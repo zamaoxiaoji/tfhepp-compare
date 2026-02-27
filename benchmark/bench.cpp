@@ -6,12 +6,12 @@
 
 void BM_TRGSWenc(benchmark::State& state)
 {
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl1 = sk->key.get<TFHEpp::lvl1param>();
     TFHEpp::TRGSWFFT<TFHEpp::lvl1param> res;
     for (auto _ : state)
-        TFHEpp::trgswSymEncrypt<TFHEpp::lvl1param>(res, {},
-                                                   TFHEpp::lvl1param::α,
-                                                   sk->key.lvl1);
+        TFHEpp::trgswSymEncrypt<TFHEpp::lvl1param>(res, {}, TFHEpp::lvl1param::α,
+                                                   keylvl1);
 }
 
 void BM_HomGate(benchmark::State& state)
@@ -19,18 +19,19 @@ void BM_HomGate(benchmark::State& state)
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
     std::uniform_int_distribution<uint32_t> binary(0, 1);
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl0 = sk->key.get<TFHEpp::lvl0param>();
     TFHEpp::EvalKey ek;
     ek.emplacebkfft<TFHEpp::lvl01param>(*sk);
     ek.emplaceiksk<TFHEpp::lvl10param>(*sk);
-    TFHEpp::TLWE<TFHEpp::lvl0param> ca =
-        TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
-            binary(engine), TFHEpp::lvl0param::α, sk->key.lvl0);
-    TFHEpp::TLWE<TFHEpp::lvl0param> cb =
-        TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
-            binary(engine), TFHEpp::lvl0param::α, sk->key.lvl0);
-    TFHEpp::TLWE<TFHEpp::lvl0param> res;
-    for (auto _ : state) TFHEpp::HomNAND<TFHEpp::lvl0param>(res, ca, cb, ek);
+    TFHEpp::TLWE<TFHEpp::lvl0param> ca{}, cb{}, res{};
+    TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
+        ca, binary(engine) ? TFHEpp::lvl0param::μ : -TFHEpp::lvl0param::μ,
+        keylvl0);
+    TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
+        cb, binary(engine) ? TFHEpp::lvl0param::μ : -TFHEpp::lvl0param::μ,
+        keylvl0);
+    for (auto _ : state) TFHEpp::HomNAND(res, ca, cb, ek);
 }
 
 void BM_HomMUX(benchmark::State& state)
@@ -38,20 +39,21 @@ void BM_HomMUX(benchmark::State& state)
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
     std::uniform_int_distribution<uint32_t> binary(0, 1);
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl0 = sk->key.get<TFHEpp::lvl0param>();
     TFHEpp::EvalKey ek;
     ek.emplacebkfft<TFHEpp::lvl01param>(*sk);
     ek.emplaceiksk<TFHEpp::lvl10param>(*sk);
-    TFHEpp::TLWE<TFHEpp::lvl0param> ca =
-        TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
-            binary(engine), TFHEpp::lvl0param::α, sk->key.lvl0);
-    TFHEpp::TLWE<TFHEpp::lvl0param> cb =
-        TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
-            binary(engine), TFHEpp::lvl0param::α, sk->key.lvl0);
-    TFHEpp::TLWE<TFHEpp::lvl0param> cs =
-        TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
-            binary(engine), TFHEpp::lvl0param::α, sk->key.lvl0);
-    TFHEpp::TLWE<TFHEpp::lvl0param> res;
+    TFHEpp::TLWE<TFHEpp::lvl0param> ca{}, cb{}, cs{}, res{};
+    TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
+        ca, binary(engine) ? TFHEpp::lvl0param::μ : -TFHEpp::lvl0param::μ,
+        keylvl0);
+    TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
+        cb, binary(engine) ? TFHEpp::lvl0param::μ : -TFHEpp::lvl0param::μ,
+        keylvl0);
+    TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
+        cs, binary(engine) ? TFHEpp::lvl0param::μ : -TFHEpp::lvl0param::μ,
+        keylvl0);
     for (auto _ : state) TFHEpp::HomMUX<TFHEpp::lvl0param>(res, cs, ca, cb, ek);
 }
 
@@ -60,16 +62,18 @@ void BM_TLWE2TRLWE(benchmark::State& state)
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
     std::uniform_int_distribution<uint32_t> binary(0, 1);
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl0 = sk->key.get<TFHEpp::lvl0param>();
     TFHEpp::EvalKey ek;
     ek.emplacebkfft<TFHEpp::lvl01param>(*sk);
-    TFHEpp::TLWE<TFHEpp::lvl0param> ca =
-        TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
-            binary(engine), TFHEpp::lvl0param::α, sk->key.lvl0);
-    TFHEpp::TRLWE<TFHEpp::lvl1param> res;
+    TFHEpp::TLWE<TFHEpp::lvl0param> ca{};
+    TFHEpp::tlweSymEncrypt<TFHEpp::lvl0param>(
+        ca, binary(engine) ? TFHEpp::lvl0param::μ : -TFHEpp::lvl0param::μ,
+        keylvl0);
+    TFHEpp::TRLWE<TFHEpp::lvl1param> res{};
     for (auto _ : state)
         TFHEpp::BlindRotate<TFHEpp::lvl01param>(
-            res, ca, *ek.bkfftlvl01,
+            res, ca, ek.getbkfft<TFHEpp::lvl01param>(),
             TFHEpp::μpolygen<TFHEpp::lvl1param, TFHEpp::lvl1param::μ>());
 }
 
@@ -78,15 +82,18 @@ void BM_IKS(benchmark::State& state)
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
     std::uniform_int_distribution<uint32_t> binary(0, 1);
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl1 = sk->key.get<TFHEpp::lvl1param>();
     TFHEpp::EvalKey ek;
     ek.emplaceiksk<TFHEpp::lvl10param>(*sk);
-    TFHEpp::TLWE<TFHEpp::lvl1param> ca =
-        TFHEpp::tlweSymEncrypt<TFHEpp::lvl1param>(
-            binary(engine), TFHEpp::lvl1param::α, sk->key.lvl1);
-    TFHEpp::TLWE<TFHEpp::lvl0param> res;
+    TFHEpp::TLWE<TFHEpp::lvl1param> ca{};
+    TFHEpp::tlweSymEncrypt<TFHEpp::lvl1param>(
+        ca, binary(engine) ? TFHEpp::lvl1param::μ : -TFHEpp::lvl1param::μ,
+        keylvl1);
+    TFHEpp::TLWE<TFHEpp::lvl0param> res{};
     for (auto _ : state)
-        TFHEpp::IdentityKeySwitch<TFHEpp::lvl10param>(res, ca, *ek.iksklvl10);
+        TFHEpp::IdentityKeySwitch<TFHEpp::lvl10param>(
+            res, ca, ek.getiksk<TFHEpp::lvl10param>());
 }
 
 void BM_SEI(benchmark::State& state)
@@ -94,14 +101,15 @@ void BM_SEI(benchmark::State& state)
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
     std::uniform_int_distribution<uint32_t> binary(0, 1);
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl1 = sk->key.get<TFHEpp::lvl1param>();
     std::array<typename TFHEpp::lvl1param::T, TFHEpp::lvl1param::n> pmu;
     for (int j = 0; j < TFHEpp::lvl1param::n; j++)
         pmu[j] = binary(engine) ? TFHEpp::lvl1param::μ : -TFHEpp::lvl1param::μ;
-    TFHEpp::TRLWE<TFHEpp::lvl1param> ca =
-        TFHEpp::trlweSymEncrypt<TFHEpp::lvl1param>(pmu, TFHEpp::lvl1param::α,
-                                                   sk->key.lvl1);
-    TFHEpp::TLWE<TFHEpp::lvl1param> res;
+    TFHEpp::TRLWE<TFHEpp::lvl1param> ca{};
+    TFHEpp::trlweSymEncrypt<TFHEpp::lvl1param>(ca, pmu, TFHEpp::lvl1param::α,
+                                               keylvl1);
+    TFHEpp::TLWE<TFHEpp::lvl1param> res{};
     for (auto _ : state)
         TFHEpp::SampleExtractIndex<TFHEpp::lvl1param>(res, ca, 0);
 }
@@ -111,24 +119,24 @@ void BM_CMUX(benchmark::State& state)
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
     std::uniform_int_distribution<uint32_t> binary(0, 1);
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl1 = sk->key.get<TFHEpp::lvl1param>();
     std::array<typename TFHEpp::lvl1param::T, TFHEpp::lvl1param::n> pmu1, pmu0;
     for (int j = 0; j < TFHEpp::lvl1param::n; j++)
         pmu1[j] = binary(engine) ? TFHEpp::lvl1param::μ : -TFHEpp::lvl1param::μ;
     for (int j = 0; j < TFHEpp::lvl1param::n; j++)
         pmu0[j] = binary(engine) ? TFHEpp::lvl1param::μ : -TFHEpp::lvl1param::μ;
-    TFHEpp::TRLWE<TFHEpp::lvl1param> c0 =
-        TFHEpp::trlweSymEncrypt<TFHEpp::lvl1param>(pmu0, TFHEpp::lvl1param::α,
-                                                   sk->key.lvl1);
-    TFHEpp::TRLWE<TFHEpp::lvl1param> c1 =
-        TFHEpp::trlweSymEncrypt<TFHEpp::lvl1param>(pmu1, TFHEpp::lvl1param::α,
-                                                   sk->key.lvl1);
+    TFHEpp::TRLWE<TFHEpp::lvl1param> c0{}, c1{};
+    TFHEpp::trlweSymEncrypt<TFHEpp::lvl1param>(c0, pmu0, TFHEpp::lvl1param::α,
+                                               keylvl1);
+    TFHEpp::trlweSymEncrypt<TFHEpp::lvl1param>(c1, pmu1, TFHEpp::lvl1param::α,
+                                               keylvl1);
     const TFHEpp::Polynomial<TFHEpp::lvl1param> plainpoly = {binary(engine)};
     TFHEpp::TRGSWFFT<TFHEpp::lvl1param> cs;
     TFHEpp::trgswSymEncrypt<TFHEpp::lvl1param>(cs, plainpoly,
                                                TFHEpp::lvl1param::α,
-                                               sk->key.lvl1);
-    TFHEpp::TRLWE<TFHEpp::lvl1param> res;
+                                               keylvl1);
+    TFHEpp::TRLWE<TFHEpp::lvl1param> res{};
     for (auto _ : state) TFHEpp::CMUXFFT<TFHEpp::lvl1param>(res, cs, c1, c0);
 }
 
@@ -137,19 +145,23 @@ void BM_ExternalProduct(benchmark::State& state)
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
     std::uniform_int_distribution<uint32_t> binary(0, 1);
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl1 = sk->key.get<TFHEpp::lvl1param>();
     std::array<typename TFHEpp::lvl1param::T, TFHEpp::lvl1param::n> pmu1, pmu0;
     for (int j = 0; j < TFHEpp::lvl1param::n; j++)
         pmu1[j] = binary(engine) ? TFHEpp::lvl1param::μ : -TFHEpp::lvl1param::μ;
+    for (int j = 0; j < TFHEpp::lvl1param::n; j++)
+        pmu0[j] = binary(engine) ? TFHEpp::lvl1param::μ : -TFHEpp::lvl1param::μ;
     TFHEpp::TRLWE<TFHEpp::lvl1param> c0 =
-        TFHEpp::trlweSymEncrypt<TFHEpp::lvl1param>(pmu0, TFHEpp::lvl1param::α,
-                                                   sk->key.lvl1);
+        {};
+    TFHEpp::trlweSymEncrypt<TFHEpp::lvl1param>(c0, pmu0, TFHEpp::lvl1param::α,
+                                               keylvl1);
     const TFHEpp::Polynomial<TFHEpp::lvl1param> plainpoly = {binary(engine)};
     TFHEpp::TRGSWFFT<TFHEpp::lvl1param> cs;
     TFHEpp::trgswSymEncrypt<TFHEpp::lvl1param>(cs, plainpoly,
                                                TFHEpp::lvl1param::α,
-                                               sk->key.lvl1);
-    TFHEpp::TRLWE<TFHEpp::lvl1param> res;
+                                               keylvl1);
+    TFHEpp::TRLWE<TFHEpp::lvl1param> res{};
     for (auto _ : state)
         TFHEpp::ExternalProduct<TFHEpp::lvl1param>(res, c0, cs);
 }
@@ -159,7 +171,8 @@ void BM_CB(benchmark::State& state)
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
     std::uniform_int_distribution<uint32_t> binary(0, 1);
-    const std::unique_ptr<TFHEpp::SecretKey> sk(new TFHEpp::SecretKey());
+    auto sk = std::make_unique<TFHEpp::SecretKey>();
+    const auto keylvl1 = sk->key.get<TFHEpp::lvl1param>();
     TFHEpp::EvalKey ek;
     using iksP = TFHEpp::lvl10param;
     using bkP = TFHEpp::lvl02param;
@@ -167,10 +180,11 @@ void BM_CB(benchmark::State& state)
     ek.emplaceiksk<iksP>(*sk);
     ek.emplacebkfft<bkP>(*sk);
     ek.emplaceprivksk4cb<privksP>(*sk);
-    TFHEpp::TLWE<TFHEpp::lvl1param> ca =
-        TFHEpp::tlweSymEncrypt<TFHEpp::lvl1param>(
-            binary(engine), TFHEpp::lvl1param::α, sk->key.lvl1);
-    TFHEpp::TRGSWFFT<TFHEpp::lvl1param> res;
+    TFHEpp::TLWE<TFHEpp::lvl1param> ca{};
+    TFHEpp::tlweSymEncrypt<TFHEpp::lvl1param>(
+        ca, binary(engine) ? TFHEpp::lvl1param::μ : -TFHEpp::lvl1param::μ,
+        keylvl1);
+    TFHEpp::TRGSWFFT<TFHEpp::lvl1param> res{};
     for (auto _ : state)
         TFHEpp::CircuitBootstrapping<iksP, bkP, privksP>(res, ca, ek);
 }

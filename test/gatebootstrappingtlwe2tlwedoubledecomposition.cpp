@@ -6,10 +6,13 @@
 
 int main()
 {
-#if defined(USE_CONCRETE) || defined(USE_CONCRETE_FFT)
-    // Skip this test for CONCRETE builds - lvl3param uses nbit=13 which exceeds
-    // the FFT table sizes initialized for CONCRETE parameters
-    std::cout << "Skipping DD gate bootstrapping test for CONCRETE build" << std::endl;
+#if defined(USE_CONCRETE) || defined(USE_CONCRETE_FFT) || defined(USE_KEY_BUNDLE)
+    // Skip this test for:
+    // - CONCRETE builds: lvl3param uses nbit=13 which exceeds the FFT table
+    //   sizes initialized for CONCRETE parameters.
+    // - USE_KEY_BUNDLE builds: the key-bundle path currently only supports
+    //   lvl1/lvl2 targets, not lvl3 (DD).
+    std::cout << "Skipping DD gate bootstrapping test for this build" << std::endl;
     return 0;
 #else
     using namespace std;

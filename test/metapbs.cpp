@@ -291,6 +291,80 @@ int main(int argc, char **argv)
         // Also test the iterative path (K=1) to exercise TruncRepeat+BlindRotate.
         if (run_one({4}, {63}, "K=1") != 0) return 1;
 
+        // Random LUTs (t=32): periodic and non-periodic.
+        // These are still *negacyclic* LUTs (f(x+t/2) = -f(x)), but the first-half
+        // values are chosen pseudo-randomly to exercise the generic path.
+        auto check_random_lut_t32 =
+            [&](const std::vector<std::int64_t> &f_half_lut,
+                const char *tag) -> int {
+            const auto tv_lut =
+                TFHEpp::metapbs::GenerateTestVectorNegacyclic<bkP::targetP>(
+                    f_half_lut, t);
+            for (std::uint32_t m = 0; m < static_cast<std::uint32_t>(t); m++) {
+                TFHEpp::TLWE<bkP::domainP> cin{};
+                TFHEpp::tlweSymIntEncrypt<bkP::domainP,
+                                         static_cast<std::uint32_t>(t)>(cin, m,
+                                                                       sk);
+
+                TFHEpp::TLWE<bkP::targetP> cout{};
+                TFHEpp::metapbs::MetaPBS<bkP>(cout, cin, *bkfft, *ahk, tv_lut,
+                                              {}, {}, t);
+
+                const auto dec_u = TFHEpp::tlweSymIntDecrypt<
+                    bkP::targetP, static_cast<std::uint32_t>(t)>(cout, sk);
+                const std::int32_t dec =
+                    static_cast<std::make_signed_t<typename bkP::targetP::T>>(
+                        dec_u);
+
+                std::int64_t exp64 = 0;
+                if (m < static_cast<std::uint32_t>(t / 2))
+                    exp64 = f_half_lut[m];
+                else
+                    exp64 = -f_half_lut[m - static_cast<std::uint32_t>(t / 2)];
+                const std::int32_t exp = static_cast<std::int32_t>(exp64);
+
+                if (dec != exp) {
+                    std::cerr << "Random LUT mismatch(" << tag << "): m=" << m
+                              << " dec=" << dec << " exp=" << exp << std::endl;
+                    return 1;
+                }
+            }
+            std::cout << "MetaPBS (t=32, random LUT " << tag << "): Passed"
+                      << std::endl;
+            return 0;
+        };
+
+        {
+            // Periodic LUT: pick a short random pattern and repeat it.
+            std::mt19937 lut_rng(0x4D505253U);  // "MPRS"
+            std::uniform_int_distribution<std::int32_t> vdist(
+                -static_cast<std::int32_t>(t / 2 - 1),
+                static_cast<std::int32_t>(t / 2 - 1));
+
+            constexpr std::uint32_t period = 4;
+            std::vector<std::int64_t> pat(period);
+            for (std::uint32_t i = 0; i < period; i++) pat[i] = vdist(lut_rng);
+
+            std::vector<std::int64_t> f_half_lut(t / 2);
+            for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(t / 2); i++)
+                f_half_lut[i] = pat[i % period];
+
+            if (check_random_lut_t32(f_half_lut, "periodic") != 0) return 1;
+        }
+        {
+            // Non-periodic LUT: each entry is sampled independently.
+            std::mt19937 lut_rng(0x4D505254U);  // "MPRT"
+            std::uniform_int_distribution<std::int32_t> vdist(
+                -static_cast<std::int32_t>(t / 2 - 1),
+                static_cast<std::int32_t>(t / 2 - 1));
+
+            std::vector<std::int64_t> f_half_lut(t / 2);
+            for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(t / 2); i++)
+                f_half_lut[i] = vdist(lut_rng);
+
+            if (check_random_lut_t32(f_half_lut, "non-periodic") != 0) return 1;
+        }
+
         // Paper claim sanity: start from a non-redundant LUT (t = 2N, so r0 = 1)
         // and use the toy-pattern coefficients 0, q/2, 0, q/2, ... .
         //
@@ -316,6 +390,62 @@ int main(int argc, char **argv)
             // certain noise bounds.)
             const std::vector<int> betas = {8, 8};
             const std::vector<int> Ts = {63, 63};  // (2T+1)*beta <= N
+
+            // Idea sanity: periodic-invariance pruning inside BlindRotate.
+            // For the 2-periodic LUT (LSB), Rot_{a}(TV)=TV whenever a is even.
+            {
+                TFHEpp::Polynomial<bkP::targetP> tv_rot{};
+                TFHEpp::PolynomialMulByXai<bkP::targetP>(
+                    tv_rot, tv_nr,
+                    static_cast<typename bkP::targetP::T>(2));  // X^2
+                for (int i = 0; i < static_cast<int>(bkP::targetP::n); i++)
+                    CHECK(tv_rot[i] == tv_nr[i]);
+
+                TFHEpp::metapbs::BlindRotatePruneStats stats{};
+                constexpr std::uint32_t prune_trials = 4;
+                std::uniform_int_distribution<std::uint32_t> mdist_full(
+                    0, static_cast<std::uint32_t>(t_nr - 1));
+                for (std::uint32_t rep = 0; rep < prune_trials; rep++) {
+                    const std::uint32_t m = mdist_full(rng);
+                    TFHEpp::TLWE<bkP::domainP> cin{};
+                    TFHEpp::tlweSymIntEncrypt<bkP::domainP,
+                                             static_cast<std::uint32_t>(t_nr)>(
+                        cin, m, sk);
+
+                    const auto lifted =
+                        TFHEpp::metapbs::LiftTLWEToInt<bkP::domainP>(cin);
+                    auto [cquo, crem] = TFHEpp::metapbs::HomDivRem<bkP::domainP>(
+                        lifted, static_cast<std::int64_t>(t_nr));
+                    (void)crem;
+
+                    alignas(64) TFHEpp::TRLWE<bkP::targetP> out_ref{};
+                    TFHEpp::metapbs::BlindRotate<bkP>(out_ref, cquo, *bkfft,
+                                                      tv_nr);
+
+                    alignas(64) TFHEpp::TRLWE<bkP::targetP> out_pruned{};
+                    TFHEpp::metapbs::BlindRotatePeriodic<bkP>(
+                        out_pruned, cquo, *bkfft, tv_nr, /*period=*/2, &stats);
+
+                    const auto phase_ref = TFHEpp::trlwePhase<bkP::targetP>(
+                        out_ref, sk.key.get<bkP::targetP>());
+                    const auto phase_pruned = TFHEpp::trlwePhase<bkP::targetP>(
+                        out_pruned, sk.key.get<bkP::targetP>());
+
+                    constexpr std::uint32_t q_over_4 = 1U << 30;
+                    constexpr std::uint32_t three_q_over_4 = 3U << 30;
+                    for (int i = 0; i < static_cast<int>(bkP::targetP::n); i++) {
+                        const bool b0 =
+                            (phase_ref[i] >= q_over_4) &&
+                            (phase_ref[i] < three_q_over_4);
+                        const bool b1 =
+                            (phase_pruned[i] >= q_over_4) &&
+                            (phase_pruned[i] < three_q_over_4);
+                        CHECK(b0 == b1);
+                    }
+                }
+                std::cout << "MetaBlindRotate (periodic-prune M=2): skipped "
+                          << stats.skipped << "/" << stats.total << std::endl;
+            }
 
             // Only test messages within 5 bits (0..31) as requested.
             for (std::uint32_t m = 0; m < 32; m++) {
@@ -379,6 +509,170 @@ int main(int argc, char **argv)
                               << " phase_u=" << phase_u << std::endl;
                     return 1;
                 }
+            }
+
+            // Interface test: MetaPBSExtractBit2N(bit) for a few bit positions.
+            {
+                TFHEpp::metapbs::BlindRotatePruneStats stats{};
+                std::vector<std::uint32_t> msgs;
+                msgs.reserve(64);
+                msgs.push_back(0);
+                msgs.push_back(1);
+                msgs.push_back(2);
+                msgs.push_back(3);
+                msgs.push_back(31);
+                msgs.push_back(32);
+                msgs.push_back(static_cast<std::uint32_t>(t_nr / 2 - 1));
+                msgs.push_back(static_cast<std::uint32_t>(t_nr / 2));
+                msgs.push_back(static_cast<std::uint32_t>(t_nr - 2));
+                msgs.push_back(static_cast<std::uint32_t>(t_nr - 1));
+                std::mt19937 msg_rng(0x42495455U);  // "BITU"
+                std::uniform_int_distribution<std::uint32_t> mdist_full(
+                    0, static_cast<std::uint32_t>(t_nr - 1));
+                for (int i = 0; i < 16; i++) msgs.push_back(mdist_full(msg_rng));
+
+                const std::array<int, 3> bits_to_test = {0, 3, 9};
+                for (const int bit : bits_to_test) {
+                    for (const std::uint32_t m : msgs) {
+                        TFHEpp::TLWE<bkP::domainP> cin{};
+                        TFHEpp::tlweSymIntEncrypt<
+                            bkP::domainP, static_cast<std::uint32_t>(t_nr)>(
+                            cin, m, sk);
+
+                        TFHEpp::TLWE<bkP::targetP> cout{};
+                        TFHEpp::metapbs::MetaPBSExtractBit2N<bkP>(
+                            cout, cin, *bkfft, *ahk, bit, &stats);
+
+                        const auto phase_u = TFHEpp::tlweSymPhase<bkP::targetP>(
+                            cout, sk.key.get<bkP::targetP>());
+                        constexpr std::uint32_t q_over_4 = 1U << 30;
+                        constexpr std::uint32_t three_q_over_4 = 3U << 30;
+                        const bool got_one =
+                            (phase_u >= q_over_4) && (phase_u < three_q_over_4);
+                        const bool exp_one = ((m >> bit) & 1U) != 0;
+                        CHECK(got_one == exp_one);
+                    }
+                }
+
+                std::cout << "MetaPBSExtractBit2N: Passed (pruned skipped "
+                          << stats.skipped << "/" << stats.total << ")"
+                          << std::endl;
+            }
+
+            // Random 1-bit LUTs (t=2N): periodic and non-periodic.
+            // Coefficients are 0 or q/2, so decoding uses a wide threshold
+            // (closer to 0 vs closer to q/2). This makes the test robust even
+            // when decoding a full 11-bit output (mod 2N) would be too tight
+            // under the current TFHEpp noise parameters.
+            auto check_random_bit_lut_t2N =
+                [&](const TFHEpp::Polynomial<bkP::targetP> &tv_bits,
+                    const std::vector<std::uint8_t> &bits,
+                    const char *tag) -> int {
+                const std::uint32_t half =
+                    static_cast<std::uint32_t>(t_nr / 2);  // N
+
+                std::vector<std::uint32_t> msgs;
+                msgs.reserve(64);
+                // A few fixed edge cases.
+                msgs.push_back(0);
+                msgs.push_back(1);
+                msgs.push_back(2);
+                msgs.push_back(3);
+                msgs.push_back(31);
+                msgs.push_back(32);
+                msgs.push_back(half - 1);
+                msgs.push_back(half);
+                msgs.push_back(half + 1);
+                msgs.push_back(static_cast<std::uint32_t>(t_nr - 2));
+                msgs.push_back(static_cast<std::uint32_t>(t_nr - 1));
+
+                // Plus a small deterministic pseudo-random sample across Z_{2N}.
+                std::mt19937 msg_rng(0x4D455441U);  // "META"
+                std::uniform_int_distribution<std::uint32_t> mdist(
+                    0, static_cast<std::uint32_t>(t_nr - 1));
+                constexpr std::uint32_t random_msgs = 32;
+                for (std::uint32_t i = 0; i < random_msgs; i++)
+                    msgs.push_back(mdist(msg_rng));
+
+                for (const std::uint32_t m : msgs) {
+                    TFHEpp::TLWE<bkP::domainP> cin{};
+                    TFHEpp::tlweSymIntEncrypt<bkP::domainP,
+                                             static_cast<std::uint32_t>(t_nr)>(
+                        cin, m, sk);
+
+                    TFHEpp::TLWE<bkP::targetP> cout{};
+                    TFHEpp::metapbs::MetaPBS<bkP>(cout, cin, *bkfft, *ahk, tv_bits,
+                                                  betas, Ts, t_nr);
+
+                    const auto phase_u = TFHEpp::tlweSymPhase<bkP::targetP>(
+                        cout, sk.key.get<bkP::targetP>());
+
+                    constexpr std::uint32_t q_over_4 = 1U << 30;
+                    constexpr std::uint32_t three_q_over_4 = 3U << 30;
+                    const bool got_one =
+                        (phase_u >= q_over_4) && (phase_u < three_q_over_4);
+
+                    // For outputs in {0, q/2}, the negacyclic extension satisfies
+                    // f(x+N) = -f(x) = f(x) (since -q/2 == q/2 on the torus).
+                    const bool exp_one = bits[m % half] != 0;
+
+                    if (got_one != exp_one) {
+                        std::cerr << "Random 1-bit LUT mismatch(" << tag << "): m="
+                                  << m << " exp=" << (exp_one ? "q/2" : "0")
+                                  << " phase_u=" << phase_u << std::endl;
+                        return 1;
+                    }
+                }
+
+                std::cout << "MetaPBS (t=2N, random 1-bit LUT " << tag
+                          << "): Passed" << std::endl;
+                return 0;
+            };
+
+            auto build_tv_from_bits =
+                [&](const std::vector<std::uint8_t> &bits)
+                    -> TFHEpp::Polynomial<bkP::targetP> {
+                TFHEpp::Polynomial<bkP::targetP> tv_bits{};
+                tv_bits.fill(0);
+                for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(t_nr / 2);
+                     i++)
+                    tv_bits[i] = bits[i] ? half_q : 0;
+                return tv_bits;
+            };
+
+            {
+                // Periodic LUT: pick a short random bit-pattern and repeat it.
+                const std::uint32_t half =
+                    static_cast<std::uint32_t>(t_nr / 2);  // N
+                std::mt19937 lut_rng(0x4D544231U);         // "MTB1"
+                std::bernoulli_distribution bdist(0.5);
+
+                constexpr std::uint32_t period = 16;
+                std::vector<std::uint8_t> pat(period);
+                for (std::uint32_t i = 0; i < period; i++)
+                    pat[i] = bdist(lut_rng) ? 1 : 0;
+
+                std::vector<std::uint8_t> bits(half);
+                for (std::uint32_t i = 0; i < half; i++) bits[i] = pat[i % period];
+
+                const auto tv_bits = build_tv_from_bits(bits);
+                if (check_random_bit_lut_t2N(tv_bits, bits, "periodic") != 0)
+                    return 1;
+            }
+            {
+                // Non-periodic LUT: each entry is sampled independently.
+                const std::uint32_t half =
+                    static_cast<std::uint32_t>(t_nr / 2);  // N
+                std::mt19937 lut_rng(0x4D544232U);         // "MTB2"
+                std::bernoulli_distribution bdist(0.5);
+
+                std::vector<std::uint8_t> bits(half);
+                for (std::uint32_t i = 0; i < half; i++)
+                    bits[i] = bdist(lut_rng) ? 1 : 0;
+
+                const auto tv_bits = build_tv_from_bits(bits);
+                if (check_random_bit_lut_t2N(tv_bits, bits, "non-periodic") != 0)
+                    return 1;
             }
 
             std::cout << "MetaPBS (t=2N, non-redundant TV 0/q2): Passed"

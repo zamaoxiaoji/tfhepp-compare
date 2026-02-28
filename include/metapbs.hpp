@@ -120,6 +120,15 @@ inline void TRLWEMulByXai(TRLWE<P> &out, const TRLWE<P> &in, const int a)
         PolynomialMulByXai<P>(out[k], in[k], static_cast<typename P::T>(aa));
 }
 
+struct BlindRotatePruneStats;
+
+template <class brP, class Int>
+void BlindRotatePeriodic(TRLWE<typename brP::targetP> &res,
+                         const LWE<typename brP::domainP, Int> &tlwe_quo,
+                         const BootstrappingKeyFFT<brP> &bkfft,
+                         const Polynomial<typename brP::targetP> &testvector,
+                         const int period, BlindRotatePruneStats *stats);
+
 // Homomorphic truncRepeat(·, [-T,T], B) (Definition 5) via
 // SampleExtract + LWE-to-RLWE packing.
 template <class P>
@@ -232,6 +241,38 @@ Polynomial<TargetP> GenerateTestVectorNegacyclic(
     return tv;
 }
 
+// Build a non-redundant (t=2N) negacyclic test vector for extracting bit "bit"
+// (LSB=0) from m in Z_{2N}. Output encoding is 0 or q/2 (torus half-turn).
+//
+// NOTE: This only supports bit < log2(N) (i.e., bit < TargetP::nbit). The MSB
+// that distinguishes [0,N) vs [N,2N) is not negacyclic in general.
+template <class TargetP>
+const Polynomial<TargetP> &BitExtractTestVector2N(const int bit)
+{
+    constexpr int N = static_cast<int>(TargetP::n);
+    if (bit < 0 || bit >= static_cast<int>(TargetP::nbit))
+        throw std::invalid_argument("BitExtractTestVector2N: bad bit index");
+
+    struct Cache {
+        std::array<Polynomial<TargetP>, TargetP::nbit> tv{};
+        std::array<bool, TargetP::nbit> inited{};
+    };
+    static Cache cache;
+
+    if (!cache.inited[bit]) {
+        Polynomial<TargetP> tv{};
+        tv.fill(0);
+        constexpr auto half_q =
+            static_cast<typename TargetP::T>(1)
+            << (std::numeric_limits<typename TargetP::T>::digits - 1);
+        for (int i = 0; i < N; i++)
+            tv[i] = ((i >> bit) & 1) ? half_q : 0;
+        cache.tv[bit] = tv;
+        cache.inited[bit] = true;
+    }
+    return cache.tv[bit];
+}
+
 // Algorithm 1 (Meta-PBS) for a negacyclic LUT (single-output).
 template <class brP, class Int = std::int64_t>
 void MetaPBS(TLWE<typename brP::targetP> &out,
@@ -289,6 +330,88 @@ void MetaPBS(TLWE<typename brP::targetP> &out,
     }
 
     SampleExtractIndex<typename brP::targetP>(out, C, 0);
+}
+
+// Meta-PBS specialized for bit extraction from m in Z_{2N} using a periodic
+// LUT (period 2^{bit+1}) with outputs in {0, q/2}.
+//
+// This wrapper enforces t=2N and constructs the corresponding non-redundant
+// test vector internally. It also applies the periodic-CMUX pruning in the
+// *first* BlindRotate (since the plaintext test vector is periodic), optionally
+// collecting stats.
+template <class brP, class Int = std::int64_t>
+void MetaPBSExtractBit2N(TLWE<typename brP::targetP> &out,
+                         const TLWE<typename brP::domainP> &in,
+                         const BootstrappingKeyFFT<brP> &bkfft,
+                         const AnnihilateKey<typename brP::targetP> &ahk,
+                         const int bit, const std::vector<int> &betas,
+                         const std::vector<int> &Ts,
+                         BlindRotatePruneStats *prune_stats = nullptr)
+{
+    if (betas.size() != Ts.size())
+        throw std::invalid_argument("MetaPBSExtractBit2N: betas/Ts size mismatch");
+
+    constexpr int N = static_cast<int>(brP::targetP::n);
+    const int twoN = 2 * N;
+
+    const auto &tv = BitExtractTestVector2N<typename brP::targetP>(bit);
+    const int period = 1 << (bit + 1);
+
+    // r0 = 2N/t = 1 for t=2N.
+    int r = 1;
+
+    const auto lifted = LiftTLWEToInt<typename brP::domainP, Int>(in);
+    auto [cquo, crem] =
+        HomDivRem<typename brP::domainP, Int>(lifted, static_cast<Int>(twoN));
+
+    TRLWE<typename brP::targetP> C;
+    BlindRotatePeriodic<brP, Int>(C, cquo, bkfft, tv, period, prune_stats);
+
+    for (size_t i = 0; i < betas.size(); i++) {
+        const int beta = betas[i];
+        const int T = Ts[i];
+        if (beta < 2)
+            throw std::invalid_argument("MetaPBSExtractBit2N: beta must be >=2");
+
+        TRLWE<typename brP::targetP> Ctr;
+        TruncRepeat<typename brP::targetP>(Ctr, C, T, beta, ahk);
+        TRLWE<typename brP::targetP> Cprime;
+        TRLWEMulByXai<typename brP::targetP>(Cprime, Ctr, DeltaRB(r, beta));
+
+        if ((crem.modulus % static_cast<Int>(beta)) != 0)
+            throw std::invalid_argument(
+                "MetaPBSExtractBit2N: beta must divide remainder modulus");
+        auto [cquo_next, crem_next] =
+            HomDivRem<typename brP::domainP, Int>(crem, static_cast<Int>(beta));
+
+        TRLWE<typename brP::targetP> Cnext;
+        BlindRotate<brP, Int>(Cnext, cquo_next, bkfft, Cprime);
+
+        C = Cnext;
+        crem = crem_next;
+        r *= beta;
+    }
+
+    SampleExtractIndex<typename brP::targetP>(out, C, 0);
+}
+
+// Convenience overload with a sane default iteration schedule for t=2N.
+template <class brP, class Int = std::int64_t>
+void MetaPBSExtractBit2N(TLWE<typename brP::targetP> &out,
+                         const TLWE<typename brP::domainP> &in,
+                         const BootstrappingKeyFFT<brP> &bkfft,
+                         const AnnihilateKey<typename brP::targetP> &ahk,
+                         const int bit,
+                         BlindRotatePruneStats *prune_stats = nullptr)
+{
+    constexpr int N = static_cast<int>(brP::targetP::n);
+    static const std::vector<int> betas = {8, 8};
+    static const std::vector<int> Ts = {
+        (N / betas[0] - 1) / 2,
+        (N / betas[1] - 1) / 2,
+    };
+    MetaPBSExtractBit2N<brP, Int>(out, in, bkfft, ahk, bit, betas, Ts,
+                                 prune_stats);
 }
 
 // Meta-PBS BlindRotate that consumes the quotient ciphertext from HomDivRem,
@@ -359,6 +482,82 @@ void BlindRotate(TRLWE<typename brP::targetP> &res,
     for (int i = 0; i < brP::domainP::k * brP::domainP::n; i++) {
         const int a = mod2N<typename brP::targetP, Int>(tlwe_quo.c[i]);
         if (a == 0) continue;
+        CMUXwithPolynomialMulByXaiMinusOne<brP>(res, bkfft[i], a);
+    }
+#endif
+}
+
+struct BlindRotatePruneStats {
+    std::uint64_t total = 0;    // CMUXes that would have run (a != 0).
+    std::uint64_t skipped = 0;  // CMUXes skipped because the rotation is a no-op.
+};
+
+// BlindRotate variant that can prune CMUXes when the (signed) 2N coefficient
+// representation of the test vector is periodic with period "period".
+// In that case, Rot_a(TV) == TV for any a ≡ 0 (mod period), so CMUX becomes
+// an unconditional identity map and can be skipped.
+//
+// NOTE: This is only correct if the caller guarantees the periodicity condition
+// for the provided plaintext testvector in R_q = Z_q[X]/(X^N+1).
+template <class brP, class Int>
+void BlindRotatePeriodic(TRLWE<typename brP::targetP> &res,
+                         const LWE<typename brP::domainP, Int> &tlwe_quo,
+                         const BootstrappingKeyFFT<brP> &bkfft,
+                         const Polynomial<typename brP::targetP> &testvector,
+                         const int period,
+                         BlindRotatePruneStats *stats)
+{
+    static_assert(brP::targetP::k == 1,
+                  "Meta-PBS currently assumes TLWE/TRLWE k=1");
+
+    if (period <= 1) {
+        BlindRotate<brP, Int>(res, tlwe_quo, bkfft, testvector);
+        return;
+    }
+    constexpr int N = static_cast<int>(brP::targetP::n);
+    const int twoN = 2 * N;
+    if ((twoN % period) != 0)
+        throw std::invalid_argument("BlindRotatePeriodic: period must divide 2N");
+
+    const int bbar = mod2N<typename brP::targetP, Int>(
+        -tlwe_quo.c[brP::domainP::k * brP::domainP::n]);
+
+    res = {};
+    PolynomialMulByXai<typename brP::targetP>(
+        res[brP::targetP::k], testvector,
+        static_cast<typename brP::targetP::T>(bbar));
+
+#ifdef USE_KEY_BUNDLE
+    for (int i = 0; i < brP::domainP::k * brP::domainP::n / brP::Addends; i++) {
+        std::array<typename brP::domainP::T, brP::Addends> bara{};
+        bool all_zero = true;
+        for (int j = 0; j < brP::Addends; j++) {
+            const int a = mod2N<typename brP::targetP, Int>(
+                tlwe_quo.c[brP::Addends * i + j]);
+            int apruned = a;
+            if (a != 0 && (a % period) == 0) apruned = 0;
+
+            bara[j] = static_cast<typename brP::domainP::T>(apruned);
+            if (stats && a != 0) {
+                stats->total++;
+                if (apruned == 0) stats->skipped++;
+            }
+            if (apruned != 0) all_zero = false;
+        }
+        if (all_zero) continue;
+        alignas(64) TRGSWFFT<typename brP::targetP> BKadded;
+        KeyBundleFFT<brP>(BKadded, bkfft[i], bara);
+        ExternalProduct<typename brP::targetP>(res, res, BKadded);
+    }
+#else
+    for (int i = 0; i < brP::domainP::k * brP::domainP::n; i++) {
+        const int a = mod2N<typename brP::targetP, Int>(tlwe_quo.c[i]);
+        if (a == 0) continue;
+        if (stats) stats->total++;
+        if ((a % period) == 0) {
+            if (stats) stats->skipped++;
+            continue;
+        }
         CMUXwithPolynomialMulByXaiMinusOne<brP>(res, bkfft[i], a);
     }
 #endif

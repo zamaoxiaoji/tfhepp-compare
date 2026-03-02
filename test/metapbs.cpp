@@ -559,6 +559,324 @@ int main(int argc, char **argv)
                           << std::endl;
             }
 
+            // High-level interface: ExtractBitInPlace(bit indexed from MSB=0).
+            //
+            // For a 10-bit message m in [0,1023], extracting bit_msb returns an
+            // LWE encrypting either 0 or (1<<bit_lsb) in Z_{2N} (2N=2048),
+            // i.e., the bit is "put back" into its original position.
+            {
+                // High-precision weighting step:
+                //   lvl1 (bit half-turn) -> lvlhalf (KS) -> lvl2 (PBS) -> lvl1 (KS)
+                // to make decoding under 2N=2048 reliable.
+                using ksToDomP = TFHEpp::lvl1hparam;   // lvl1 -> lvlhalf
+                using weightBkP = TFHEpp::lvlh2param;  // lvlhalf -> lvl2
+                using ksDownP = TFHEpp::lvl21param;    // lvl2 -> lvl1
+
+                auto ksk1h = std::make_unique<TFHEpp::KeySwitchingKey<ksToDomP>>();
+                TFHEpp::ikskgen<ksToDomP>(*ksk1h, sk);
+
+                auto bkfft_h2 =
+                    std::make_unique<TFHEpp::BootstrappingKeyFFT<weightBkP>>();
+                TFHEpp::bkfftgen<weightBkP>(*bkfft_h2, sk);
+
+                auto ksk21 = std::make_unique<TFHEpp::KeySwitchingKey<ksDownP>>();
+                TFHEpp::ikskgen<ksDownP>(*ksk21, sk);
+
+                std::vector<std::uint32_t> msgs;
+                msgs.reserve(64);
+                // Fixed edge cases within 10 bits.
+                msgs.push_back(0);
+                msgs.push_back(1);
+                msgs.push_back(2);
+                msgs.push_back(3);
+                msgs.push_back(15);
+                msgs.push_back(16);
+                msgs.push_back(31);
+                msgs.push_back(32);
+                msgs.push_back(511);
+                msgs.push_back(512);
+                msgs.push_back(1023);
+
+                std::mt19937 msg_rng(0x45584254U);  // "EXBT"
+                std::uniform_int_distribution<std::uint32_t> mdist_10bit(0, 1023);
+                for (int i = 0; i < 32; i++) msgs.push_back(mdist_10bit(msg_rng));
+
+                for (const std::uint32_t m : msgs) {
+                    TFHEpp::TLWE<bkP::domainP> cin{};
+                    TFHEpp::tlweSymIntEncrypt<
+                        bkP::domainP, static_cast<std::uint32_t>(t_nr)>(cin, m,
+                                                                      sk);
+
+                    for (int bit_msb = 0;
+                         bit_msb < static_cast<int>(bkP::targetP::nbit);
+                         bit_msb++) {
+                        const int bit_lsb =
+                            (static_cast<int>(bkP::targetP::nbit) - 1) - bit_msb;
+                        const std::uint32_t weight = 1u << bit_lsb;
+
+                        TFHEpp::TLWE<bkP::targetP> cout{};
+                        TFHEpp::metapbs::ExtractBitInPlaceViaLvl2<
+                            bkP, weightBkP, ksToDomP, ksDownP>(
+                            cout, cin, *bkfft, *ahk, *ksk1h, *bkfft_h2, *ksk21,
+                            bit_msb);
+
+                        const auto dec_u = TFHEpp::tlweSymIntDecrypt<
+                            bkP::targetP,
+                            static_cast<std::uint32_t>(t_nr)>(cout, sk);
+                        const std::int32_t dec =
+                            static_cast<std::make_signed_t<
+                                typename bkP::targetP::T>>(dec_u);
+                        const std::int32_t exp =
+                            ((m >> bit_lsb) & 1U)
+                                ? static_cast<std::int32_t>(weight)
+                                : 0;
+
+                        if (dec != exp) {
+                            std::cerr << "ExtractBitInPlace mismatch: m=" << m
+                                      << " bit_msb=" << bit_msb
+                                      << " bit_lsb=" << bit_lsb
+                                      << " dec=" << dec << " exp=" << exp
+                                      << std::endl;
+                            // Debug the 3-stage pipeline:
+                            //  (1) MetaPBSExtractBit2N -> {0,q/2}
+                            //  (2) rescale by 2^{-nbit} and negate -> {0,Δ}
+                            //  (3) multiply by weight -> {0,weight}
+                            {
+                                using TargetP = typename bkP::targetP;
+                                constexpr int digits =
+                                    std::numeric_limits<typename TargetP::T>::digits;
+                                constexpr int delta_shift =
+                                    digits - (static_cast<int>(TargetP::nbit) + 1);
+                                const auto w_half =
+                                    static_cast<typename TargetP::T>(
+                                        static_cast<typename TargetP::T>(weight)
+                                        << (delta_shift - 1));
+
+                                TFHEpp::TLWE<TargetP> bit_ct_dbg{};
+                                TFHEpp::metapbs::MetaPBSExtractBit2N<bkP>(
+                                    bit_ct_dbg, cin, *bkfft, *ahk, bit_lsb);
+                                const auto bit_phase_u =
+                                    TFHEpp::tlweSymPhase<TargetP>(
+                                        bit_ct_dbg, sk.key.get<TargetP>());
+                                const std::int64_t bit_phase =
+                                    static_cast<std::make_signed_t<typename TargetP::T>>(
+                                        bit_phase_u);
+                                const auto bit_dec_u = TFHEpp::tlweSymIntDecrypt<
+                                    TargetP,
+                                    static_cast<std::uint32_t>(t_nr)>(bit_ct_dbg,
+                                                                     sk);
+                                const std::int32_t bit_dec =
+                                    static_cast<std::make_signed_t<typename TargetP::T>>(
+                                        bit_dec_u);
+
+                                std::cerr << "  dbg: weight=" << weight
+                                          << " w_half(int)="
+                                          << static_cast<std::int64_t>(w_half >>
+                                                                       delta_shift)
+                                          << "\n"
+                                          << "  dbg: bit_ct phase=" << bit_phase
+                                          << " dec_mod2N=" << bit_dec << "\n";
+                            }
+                            return 1;
+                        }
+                    }
+                }
+
+                // 16-bit input adaptation idea:
+                // If a 10-bit value x is embedded into a 16-bit plaintext by
+                // shifting left by (16-(nbit+1)) bits, then its torus encoding
+                // matches the mod-2N (2N=2048) encoding:
+                //   (x << embed_shift) * 2^(32-16) == x * 2^(32-(nbit+1)).
+                // This lets MetaPBS "see" x (no rounding) while the ciphertext
+                // is still a valid 16-bit TLWE integer ciphertext.
+                {
+                    constexpr std::uint32_t t16 = 1u << 16;
+                    constexpr int embed_shift =
+                        16 - (static_cast<int>(bkP::targetP::nbit) + 1);
+                    static_assert(embed_shift >= 0,
+                                  "16-bit embedding requires 16 >= nbit+1");
+
+                    std::mt19937 rng16(0x31364254U);  // "16BT"
+                    std::uniform_int_distribution<std::uint32_t> xdist(
+                        0, (1u << bkP::targetP::nbit) - 1);
+
+                    for (int bit_msb = 0;
+                         bit_msb < static_cast<int>(bkP::targetP::nbit);
+                         bit_msb++) {
+                        const int bit_lsb =
+                            (static_cast<int>(bkP::targetP::nbit) - 1) - bit_msb;
+                        for (int rep = 0; rep < 100; rep++) {
+                            const std::uint32_t x = xdist(rng16);
+                            const std::uint32_t m16 = x << embed_shift;
+
+                            TFHEpp::TLWE<bkP::domainP> cin16{};
+                            TFHEpp::tlweSymIntEncrypt<bkP::domainP, t16>(cin16, m16,
+                                                                        sk);
+
+                            TFHEpp::TLWE<bkP::targetP> cout16{};
+                            TFHEpp::metapbs::ExtractBitInPlaceViaLvl2<
+                                bkP, weightBkP, ksToDomP, ksDownP>(
+                                cout16, cin16, *bkfft, *ahk, *ksk1h, *bkfft_h2,
+                                *ksk21, bit_msb);
+
+                            const auto dec_u =
+                                TFHEpp::tlweSymIntDecrypt<bkP::targetP,
+                                                         static_cast<std::uint32_t>(
+                                                             t_nr)>(cout16, sk);
+                            const std::uint32_t dec = dec_u;
+                            const std::uint32_t exp =
+                                ((x >> bit_lsb) & 1U)
+                                    ? (1u << bit_lsb)
+                                    : 0u;
+
+                            if (dec != exp) {
+                                std::cerr
+                                    << "ExtractBitInPlace(16-bit embed) mismatch:"
+                                    << " x=" << x << " m16=" << m16
+                                    << " bit_msb=" << bit_msb
+                                    << " bit_lsb=" << bit_lsb << " dec=" << dec
+                                    << " exp=" << exp << std::endl;
+                                return 1;
+                            }
+                        }
+                    }
+
+                    std::cout << "ExtractBitInPlace (16-bit embedded): Passed"
+                              << std::endl;
+                }
+
+                // Experiment / fail-rate measurement:
+                // Start from a random 16-bit ciphertext at lvl1 (mod 2^16),
+                // rescale it to the mod-2N encoding by a torus left shift,
+                // then key-switch to lvlhalf to feed MetaPBS extraction,
+                // and finally subtract the extracted (bit*weight) ciphertext to
+                // "clear that bit" in Z_{2N}.
+                //
+                // This is a noisy pipeline because the lvl1->lvlhalf key switch
+                // happens on an 11-bit plaintext space (2N=2048). Use --failrate
+                // to quantify the error probability.
+                if (failrate_trials > 0) {
+                    constexpr std::uint32_t t16 = 1u << 16;
+                    constexpr int embed_shift =
+                        16 - (static_cast<int>(bkP::targetP::nbit) + 1);
+                    static_assert(embed_shift >= 0,
+                                  "16-bit embedding requires 16 >= nbit+1");
+
+                    std::mt19937 rng_clr(0x434C5232U);  // "CLR2"
+                    std::uniform_int_distribution<std::uint32_t> mdist16(0,
+                                                                         t16 - 1);
+                    std::uniform_int_distribution<int> bdist(
+                        0, static_cast<int>(bkP::targetP::nbit) - 1);
+
+                    std::uint64_t fails = 0;
+                    constexpr std::uint64_t max_print = 5;
+
+                    for (std::uint64_t rep = 0; rep < failrate_trials; rep++) {
+                        const std::uint32_t m16 = mdist16(rng_clr);
+                        const int bit_msb = bdist(rng_clr);
+                        const int bit_lsb =
+                            (static_cast<int>(bkP::targetP::nbit) - 1) - bit_msb;
+                        const std::uint32_t weight = 1u << bit_lsb;
+
+                        // ctI: random 16-bit plaintext, encrypted at lvl1.
+                        TFHEpp::TLWE<bkP::targetP> ctI{};
+                        TFHEpp::tlweSymIntEncrypt<bkP::targetP, t16>(ctI, m16, sk);
+
+                        // ct1_lvl1: rescale 16-bit encoding -> mod 2N encoding
+                        // (same integer value modulo 2N).
+                        TFHEpp::TLWE<bkP::targetP> ct1_lvl1 = ctI;
+                        for (auto &x : ct1_lvl1)
+                            x = static_cast<typename bkP::targetP::T>(
+                                x << embed_shift);
+
+                        // Key switch to the MetaPBS extract domain (lvlhalf).
+                        TFHEpp::TLWE<bkP::domainP> ct1_dom{};
+                        TFHEpp::IdentityKeySwitch<ksToDomP>(ct1_dom, ct1_lvl1,
+                                                           *ksk1h);
+
+                        // ct2_lvl1: extracted bit put back in-place (returned at lvl1),
+                        // encoded for modulus 2N.
+                        TFHEpp::TLWE<bkP::targetP> ct2_lvl1{};
+                        TFHEpp::metapbs::ExtractBitInPlaceViaLvl2<
+                            bkP, weightBkP, ksToDomP, ksDownP>(
+                            ct2_lvl1, ct1_dom, *bkfft, *ahk, *ksk1h, *bkfft_h2,
+                            *ksk21, bit_msb);
+
+                        // Subtract at lvl1 in the mod-2N encoding.
+                        TFHEpp::TLWE<bkP::targetP> ct_clear = ct1_lvl1;
+                        for (size_t i = 0; i < ct_clear.size(); i++)
+                            ct_clear[i] -= ct2_lvl1[i];
+
+                        const auto dec_u = TFHEpp::tlweSymIntDecrypt<
+                            bkP::targetP, static_cast<std::uint32_t>(t_nr)>(
+                            ct_clear, sk);
+                        const std::int32_t dec =
+                            static_cast<std::make_signed_t<typename bkP::targetP::T>>(
+                                dec_u);
+
+                        const std::uint32_t m_mod2N =
+                            m16 & (static_cast<std::uint32_t>(t_nr) - 1);
+                        const std::uint32_t exp_u = m_mod2N & (~weight);
+                        const std::int32_t exp =
+                            (exp_u >= static_cast<std::uint32_t>(t_nr / 2))
+                                ? static_cast<std::int32_t>(exp_u) -
+                                      static_cast<std::int32_t>(t_nr)
+                                : static_cast<std::int32_t>(exp_u);
+
+                        if (dec != exp) {
+                            fails++;
+                            if (fails <= max_print) {
+                                const auto ct1_lvl1_u = TFHEpp::tlweSymIntDecrypt<
+                                    bkP::targetP,
+                                    static_cast<std::uint32_t>(t_nr)>(ct1_lvl1,
+                                                                     sk);
+                                const std::int32_t ct1_lvl1_dec =
+                                    static_cast<std::make_signed_t<typename bkP::targetP::T>>(
+                                        ct1_lvl1_u);
+
+                                const auto ct1_dom_u = TFHEpp::tlweSymIntDecrypt<
+                                    bkP::domainP,
+                                    static_cast<std::uint32_t>(t_nr)>(ct1_dom,
+                                                                     sk);
+                                const std::int32_t ct1_dom_dec =
+                                    static_cast<std::make_signed_t<typename bkP::domainP::T>>(
+                                        ct1_dom_u);
+
+                                const auto ct2_u = TFHEpp::tlweSymIntDecrypt<
+                                    bkP::targetP,
+                                    static_cast<std::uint32_t>(t_nr)>(ct2_lvl1,
+                                                                     sk);
+                                const std::int32_t ct2_dec =
+                                    static_cast<std::make_signed_t<typename bkP::targetP::T>>(
+                                        ct2_u);
+
+                                std::cerr
+                                    << "ClearBit mismatch: rep=" << rep
+                                    << " m16=" << m16 << " bit_msb=" << bit_msb
+                                    << " bit_lsb=" << bit_lsb << " dec=" << dec
+                                    << " exp=" << exp << "\n"
+                                    << "  dbg: ct1_lvl1(dec mod2N)="
+                                    << ct1_lvl1_dec
+                                    << " ct1_dom(dec mod2N)=" << ct1_dom_dec
+                                    << " ct2(dec mod2N)=" << ct2_dec << std::endl;
+                            }
+                        }
+                    }
+
+                    const double rate = static_cast<double>(fails) /
+                                        static_cast<double>(failrate_trials);
+                    std::cout << "FailRate(ClearBit 16-bit->shift->KS->ExtractBitInPlace->sub): "
+                              << fails << "/" << failrate_trials << " = " << rate;
+                    if (fails == 0) {
+                        std::cout << " (95% upper bound ~"
+                                  << (3.0 / failrate_trials) << ")";
+                    }
+                    std::cout << std::endl;
+                }
+
+                std::cout << "ExtractBitInPlace: Passed" << std::endl;
+            }
+
             // Random 1-bit LUTs (t=2N): periodic and non-periodic.
             // Coefficients are 0 or q/2, so decoding uses a wide threshold
             // (closer to 0 vs closer to q/2). This makes the test robust even

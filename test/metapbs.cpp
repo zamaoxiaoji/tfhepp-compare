@@ -20,7 +20,7 @@ namespace {
     } while (0)
 
 template <class DomainP>
-std::int64_t phase_star(const TFHEpp::metapbs::LWE<DomainP, std::int64_t> &c,
+std::int64_t phase_star(const TFHEpp::metapbs::detail::LWE<DomainP, std::int64_t> &c,
                         const TFHEpp::Key<DomainP> &key)
 {
     std::int64_t acc = c.c[DomainP::k * DomainP::n];
@@ -64,8 +64,8 @@ int main(int argc, char **argv)
         TFHEpp::tlweSymIntEncrypt<domainP, static_cast<std::uint32_t>(q_quo)>(
             c, m, sk);
 
-        const auto lifted = TFHEpp::metapbs::LiftTLWEToInt<domainP>(c);
-        const auto [cquo, crem] = TFHEpp::metapbs::HomDivRem<domainP>(lifted, q_quo);
+        const auto lifted = TFHEpp::metapbs::detail::LiftTLWEToInt<domainP>(c);
+        const auto [cquo, crem] = TFHEpp::metapbs::detail::HomDivRem<domainP>(lifted, q_quo);
 
         const std::int64_t psi = phase_star<domainP>(lifted, sk.key.get<domainP>());
         const std::int64_t psi_quo = phase_star<domainP>(cquo, sk.key.get<domainP>());
@@ -100,14 +100,14 @@ int main(int argc, char **argv)
                             : static_cast<brP::targetP::T>(brP::targetP::μ);
         }
 
-        TFHEpp::metapbs::LWE<brP::domainP> tlwe_quo{};
+        TFHEpp::metapbs::detail::LWE<brP::domainP> tlwe_quo{};
         tlwe_quo.modulus = q_quo;
         // Arbitrary coefficients; secret is zero so they should have no effect.
         for (int i = 0; i < brP::domainP::k * brP::domainP::n; i++)
             tlwe_quo.c[i] = static_cast<std::int64_t>((i * 17) % (2 * brP::targetP::n));
         tlwe_quo.c[brP::domainP::k * brP::domainP::n] = 123;
 
-        const int bbar = TFHEpp::metapbs::mod2N<brP::targetP, std::int64_t>(
+        const int bbar = TFHEpp::metapbs::detail::mod2N<brP::targetP, std::int64_t>(
             -tlwe_quo.c[brP::domainP::k * brP::domainP::n]);
 
         TFHEpp::Polynomial<brP::targetP> expected_tv{};
@@ -115,7 +115,7 @@ int main(int argc, char **argv)
             expected_tv, tv, static_cast<brP::targetP::T>(bbar));
 
         alignas(64) TFHEpp::TRLWE<brP::targetP> out_tv;
-        TFHEpp::metapbs::BlindRotate<brP>(out_tv, tlwe_quo, *bkfft, tv);
+        TFHEpp::metapbs::detail::BlindRotate<brP>(out_tv, tlwe_quo, *bkfft, tv);
         const auto dec_tv = TFHEpp::trlweSymDecrypt<brP::targetP>(out_tv, targetkey);
         for (int i = 0; i < brP::targetP::n; i++) {
             const bool exp =
@@ -128,7 +128,7 @@ int main(int argc, char **argv)
         TFHEpp::trlweSymEncrypt<brP::targetP>(tv_ct, tv, targetkey);
 
         alignas(64) TFHEpp::TRLWE<brP::targetP> out_ct;
-        TFHEpp::metapbs::BlindRotate<brP>(out_ct, tlwe_quo, *bkfft, tv_ct);
+        TFHEpp::metapbs::detail::BlindRotate<brP>(out_ct, tlwe_quo, *bkfft, tv_ct);
         const auto dec_ct = TFHEpp::trlweSymDecrypt<brP::targetP>(out_ct, targetkey);
         for (int i = 0; i < brP::targetP::n; i++) {
             const bool exp =
@@ -165,7 +165,7 @@ int main(int argc, char **argv)
         TFHEpp::trlweSymEncrypt<P>(ct, m, key);
 
         TFHEpp::TRLWE<P> ct_tr;
-        TFHEpp::metapbs::TruncRepeat<P>(ct_tr, ct, T, B, *ahk);
+        TFHEpp::metapbs::detail::TruncRepeat<P>(ct_tr, ct, T, B, *ahk);
 
         const auto dec =
             TFHEpp::trlweSymIntDecrypt<P, plain_modulus>(ct_tr, key);
@@ -203,11 +203,11 @@ int main(int argc, char **argv)
                 pad[static_cast<int>(P::n) + D] = neg_mod(cd);
         }
 
-        const int kmin = TFHEpp::metapbs::sym_min(B);
-        const int kmax = TFHEpp::metapbs::sym_max(B);
+        const int kmin = TFHEpp::metapbs::detail::sym_min(B);
+        const int kmax = TFHEpp::metapbs::detail::sym_max(B);
         std::array<std::uint32_t, P::n> exp{};
         for (int k = kmin; k <= kmax; k++) {
-            const int a = TFHEpp::metapbs::mod2N<P, int>(k);
+            const int a = TFHEpp::metapbs::detail::mod2N<P, int>(k);
             const auto rot = mul_by_Xai(pad, a);
             for (int i = 0; i < P::n; i++)
                 exp[i] = (exp[i] + rot[i]) & (plain_modulus - 1);
@@ -413,17 +413,17 @@ int main(int argc, char **argv)
                         cin, m, sk);
 
                     const auto lifted =
-                        TFHEpp::metapbs::LiftTLWEToInt<bkP::domainP>(cin);
-                    auto [cquo, crem] = TFHEpp::metapbs::HomDivRem<bkP::domainP>(
+                        TFHEpp::metapbs::detail::LiftTLWEToInt<bkP::domainP>(cin);
+                    auto [cquo, crem] = TFHEpp::metapbs::detail::HomDivRem<bkP::domainP>(
                         lifted, static_cast<std::int64_t>(t_nr));
                     (void)crem;
 
                     alignas(64) TFHEpp::TRLWE<bkP::targetP> out_ref{};
-                    TFHEpp::metapbs::BlindRotate<bkP>(out_ref, cquo, *bkfft,
+                    TFHEpp::metapbs::detail::BlindRotate<bkP>(out_ref, cquo, *bkfft,
                                                       tv_nr);
 
                     alignas(64) TFHEpp::TRLWE<bkP::targetP> out_pruned{};
-                    TFHEpp::metapbs::BlindRotatePeriodic<bkP>(
+                    TFHEpp::metapbs::detail::BlindRotatePeriodic<bkP>(
                         out_pruned, cquo, *bkfft, tv_nr, /*period=*/2, &stats);
 
                     const auto phase_ref = TFHEpp::trlwePhase<bkP::targetP>(
@@ -540,7 +540,7 @@ int main(int argc, char **argv)
                             cin, m, sk);
 
                         TFHEpp::TLWE<bkP::targetP> cout{};
-                        TFHEpp::metapbs::MetaPBSExtractBit2N<bkP>(
+                        TFHEpp::metapbs::detail::MetaPBSExtractBit2N<bkP>(
                             cout, cin, *bkfft, *ahk, bit, &stats);
 
                         const auto phase_u = TFHEpp::tlweSymPhase<bkP::targetP>(
@@ -615,7 +615,7 @@ int main(int argc, char **argv)
                         const std::uint32_t weight = 1u << bit_lsb;
 
                         TFHEpp::TLWE<bkP::targetP> cout{};
-                        TFHEpp::metapbs::ExtractBitInPlaceViaLvl2<
+                        TFHEpp::metapbs::ExtractBit<
                             bkP, weightBkP, ksToDomP, ksDownP>(
                             cout, cin, *bkfft, *ahk, *ksk1h, *bkfft_h2, *ksk21,
                             bit_msb);
@@ -653,7 +653,7 @@ int main(int argc, char **argv)
                                         << (delta_shift - 1));
 
                                 TFHEpp::TLWE<TargetP> bit_ct_dbg{};
-                                TFHEpp::metapbs::MetaPBSExtractBit2N<bkP>(
+                                TFHEpp::metapbs::detail::MetaPBSExtractBit2N<bkP>(
                                     bit_ct_dbg, cin, *bkfft, *ahk, bit_lsb);
                                 const auto bit_phase_u =
                                     TFHEpp::tlweSymPhase<TargetP>(
@@ -714,7 +714,7 @@ int main(int argc, char **argv)
                                                                         sk);
 
                             TFHEpp::TLWE<bkP::targetP> cout16{};
-                            TFHEpp::metapbs::ExtractBitInPlaceViaLvl2<
+                            TFHEpp::metapbs::ExtractBit<
                                 bkP, weightBkP, ksToDomP, ksDownP>(
                                 cout16, cin16, *bkfft, *ahk, *ksk1h, *bkfft_h2,
                                 *ksk21, bit_msb);
@@ -797,7 +797,7 @@ int main(int argc, char **argv)
                         // ct2_lvl1: extracted bit put back in-place (returned at lvl1),
                         // encoded for modulus 2N.
                         TFHEpp::TLWE<bkP::targetP> ct2_lvl1{};
-                        TFHEpp::metapbs::ExtractBitInPlaceViaLvl2<
+                        TFHEpp::metapbs::ExtractBit<
                             bkP, weightBkP, ksToDomP, ksDownP>(
                             ct2_lvl1, ct1_dom, *bkfft, *ahk, *ksk1h, *bkfft_h2,
                             *ksk21, bit_msb);

@@ -339,7 +339,7 @@ void HomMSB_MetaPBS(
     TFHEpp::IdentityKeySwitch<ksToDomP>(diff_dom, diff, ksk_to_dom);
 
     TFHEpp::TLWE<TargetP> extracted{};
-    TFHEpp::metapbs::ExtractBitInPlaceViaLvl2<
+    TFHEpp::metapbs::ExtractBit<
         brP, weightBkP, ksToDomP, ksDownP>(
         extracted, diff_dom, bkfft_extract, ahk,
         ksk_to_dom, bkfft_weight, ksk_down, bit_msb_extract);

@@ -45,19 +45,16 @@ static void test_theorem2_paper_params() {
 // ---------------------------------------------------------------
 static void test_max_extractable_bit() {
     printf("[MaxExtractableBit]\n");
-    // t=4096=2^12: MaxExtractableBit = 11
-    if (MaxExtractableBit(4096) != 11) {
-        printf("  FAIL: t=4096 expected 11, got %d\n", MaxExtractableBit(4096));
+    if (MaxExtractableBit(2048) != 10) {
+        printf("  FAIL: N=2048 expected 10, got %d\n", MaxExtractableBit(2048));
         exit(1);
     }
-    // t=8=2^3: MaxExtractableBit = 2
-    if (MaxExtractableBit(8) != 2) {
-        printf("  FAIL: t=8 expected 2, got %d\n", MaxExtractableBit(8));
+    if (MaxExtractableBit(32) != 4) {
+        printf("  FAIL: N=32 expected 4, got %d\n", MaxExtractableBit(32));
         exit(1);
     }
-    // t=6=2*3: only factor of 2 is 1, MaxExtractableBit = 0
-    if (MaxExtractableBit(6) != 0) {
-        printf("  FAIL: t=6 expected 0, got %d\n", MaxExtractableBit(6));
+    if (MaxExtractableBit(1) != -1) {
+        printf("  FAIL: N=1 expected -1, got %d\n", MaxExtractableBit(1));
         exit(1);
     }
     printf("  PASSED\n");
@@ -68,24 +65,18 @@ static void test_max_extractable_bit() {
 // ---------------------------------------------------------------
 static void test_decode_binary_phase() {
     printf("[DecodeBinaryPhase]\n");
-    // Phase ≈ 0 → bit 0
-    if (DecodeBinaryPhase(0) != 0) { printf("  FAIL at 0\n"); exit(1); }
-    // Phase ≈ Q/2 = BinaryScale → bit 1
-    if (DecodeBinaryPhase(BinaryScale) != 0) {
-        // BinaryScale = Q/2, after wrapping → 0 again? Let's trace:
-        // BinaryScale = 2^63, >= BinaryScale → phase -= BinaryScale → phase = 0
-        // 0 < threshold=2^62 → 0. Correct! Encoding Q/2 is a valid point.
+    if (DecodeBinaryPhase(uint64_t(0)) != 0) { printf("  FAIL at 0\n"); exit(1); }
+    if (DecodeBinaryPhase(BinaryScale) != 1) {
+        printf("  FAIL at Q/2=%lu expected 1, got %d\n",
+               BinaryScale, DecodeBinaryPhase(BinaryScale));
+        exit(1);
     }
-    // Phase = 3*Q/4: wrap around
     uint64_t three_q4 = BinaryScale + BinaryScale / 2;  // 3Q/4
-    // three_q4 >= BinaryScale → phase = BinaryScale/2 = Q/4
-    // Q/4 >= threshold=Q/4 → 1
-    if (DecodeBinaryPhase(three_q4) != 1) {
-        printf("  FAIL at 3Q/4=%lu expected 1, got %d\n",
+    if (DecodeBinaryPhase(three_q4) != 0) {
+        printf("  FAIL at 3Q/4=%lu expected 0, got %d\n",
                three_q4, DecodeBinaryPhase(three_q4));
         exit(1);
     }
-    // Phase = Q/4: below threshold → 0? No: Q/4 >= Q/4 → 1
     if (DecodeBinaryPhase(BinaryScale / 2) != 1) {
         printf("  FAIL at Q/4=%lu expected 1, got %d\n",
                BinaryScale / 2, DecodeBinaryPhase(BinaryScale / 2));
@@ -101,31 +92,32 @@ static void test_decode_binary_phase() {
 // ---------------------------------------------------------------
 static void test_build_kth_bit_tv() {
     printf("[BuildKthBitTestVector] structural check\n");
-    // For small t=16, k=0 (LSB): f(m) = m & 1
-    // TV should encode 0 or Q/t at proper positions
-    constexpr int t_small = 16;
-    auto tv = BuildKthBitTestVector<tgtP>(0, t_small);
     constexpr int N = tgtP::n;
+    constexpr int t = 2 * N;
+    auto tv = BuildKthBitTestVector<tgtP>(0, t);
 
-    // Verify TV is not all-zero (basic sanity)
-    bool has_nonzero = false;
-    for (int i = 0; i < N; i++) {
-        if (tv[i] != 0) { has_nonzero = true; break; }
+    for (int m = 0; m < N; m++) {
+        uint64_t want = (m & 1) ? BinaryScale : 0;
+        if (tv[m] != want) {
+            printf("  FAIL: m=%d got=%lu want=%lu\n", m, tv[m], want);
+            exit(1);
+        }
     }
-    if (!has_nonzero) {
-        printf("  FAIL: TV is all zeros\n");
+
+    bool rejected = false;
+    try {
+        (void)BuildKthBitTestVector<tgtP>(11, t);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        printf("  FAIL: expected top bit rejection for k=11\n");
         exit(1);
     }
 
-    // Verify f(1) = 1 encoded correctly at position r0 = 2N/t_small
-    // The TV at position 1*r0 should encode BinaryScale / t_small... but wait,
-    // BuildKthBitTestVector uses paper scale Q/t (not Q/2).
-    // f(1) = 1: encoded as uint64_t(1) * (Q/t_small)
-    // This gets distributed over [r0]_sym slots around position r0.
-    // Just verify total sum of positive slots = expected encoding
     printf("  TV[0..4] = {%lu, %lu, %lu, %lu, %lu}\n",
            tv[0], tv[1], tv[2], tv[3], tv[4]);
-    printf("  PASSED (structural check)\n");
+    printf("  PASSED\n");
 }
 
 // ---------------------------------------------------------------
@@ -202,6 +194,47 @@ static void test_algorithm1_k0_compiles_and_runs() {
     printf("  PASSED\n");
 }
 
+static void test_periodic_pruning_stats() {
+    printf("[BlindRotate periodic pruning stats]\n");
+    using brP   = TFHEpp::lvl01param;
+    using lvl1P = TFHEpp::lvl1param;
+    using lvl0P = TFHEpp::lvl0param;
+
+    TFHEpp::SecretKey sk;
+    TFHEpp::EvalKey ek;
+    ek.emplacebkfft<brP>(sk);
+
+    Algorithm1Config cfg{.K = 0, .t = 2 * static_cast<int>(lvl1P::n), .rounds = {}};
+    std::vector<TruncRepeatKey<lvl1P>> trkeys;
+
+    TFHEpp::TLWE<lvl0P> enc_ct;
+    TFHEpp::tlweSymEncrypt<lvl0P>(
+        enc_ct,
+        static_cast<typename lvl0P::T>(17) *
+            (((~typename lvl0P::T(0)) / typename lvl0P::T(2 * lvl1P::n)) + 1),
+        lvl0P::α, sk.key.get<lvl0P>());
+
+    BlindRotatePruneStats stats;
+    auto cout = RunAlgorithm1<brP>(
+        enc_ct, [](int x) { return x & 1; },
+        ek.getbkfft<brP>(), trkeys, cfg,
+        /*first_blind_rotate_period=*/2, &stats);
+    (void)cout;
+
+    if (stats.total == 0 || stats.skipped == 0) {
+        printf("  FAIL: expected non-zero periodic pruning stats, got skipped=%lu total=%lu\n",
+               stats.skipped, stats.total);
+        exit(1);
+    }
+    if (stats.skipped > stats.total) {
+        printf("  FAIL: skipped > total\n");
+        exit(1);
+    }
+    printf("  skipped=%lu/%lu (%.2f%%)\n",
+           stats.skipped, stats.total, 100.0 * stats.prune_rate());
+    printf("  PASSED\n");
+}
+
 int main() {
     printf("=== MetaPBS2 Module 4+5: pipeline + bit_extraction ===\n");
     test_theorem2_paper_params();
@@ -210,6 +243,7 @@ int main() {
     test_build_kth_bit_tv();
     test_build_metapbs_tv_identity();
     test_algorithm1_k0_compiles_and_runs();
+    test_periodic_pruning_stats();
     printf("=== ALL PASSED ===\n");
     return 0;
 }

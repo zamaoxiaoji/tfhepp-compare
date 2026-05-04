@@ -25,6 +25,7 @@
 #include <functional>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 #include "params.hpp"
 #include "tlwe.hpp"
@@ -39,24 +40,29 @@ namespace MetaPBS2 {
 // BinaryScale = Q/2 = 2^63  (for uint64_t torus)
 // Binary encoding: 0 → 0,  1 → BinaryScale = Q/2
 // =============================================================
-constexpr uint64_t BinaryScale = uint64_t(1) << 63;
+template <typename T>
+constexpr T BinaryScaleT = T(1) << (std::numeric_limits<T>::digits - 1);
+
+constexpr uint64_t BinaryScale = BinaryScaleT<uint64_t>;
 
 // =============================================================
-// MaxExtractableBit: largest k such that 2^k divides t
-// Equivalently: the number of trailing zeros in t (in binary).
+// MaxExtractableBit: largest supported k for t=2N binary 0/Q/2 output.
 //
-// For t = 4096 = 2^12: MaxExtractableBit = 11 (bits 0..11).
+// The top bit of Z_{2N} is not compatible with negacyclic binary 0/Q/2
+// encoding because bit_k(m+N) must equal bit_k(m). For N=2048, this returns
+// 10, matching tfhe-go's MaxExtractableBit(N).
 //
 // Mirrors: func MaxExtractableBit(N int) int
 // =============================================================
-inline int MaxExtractableBit(int t) {
-    if (t <= 0) return -1;
-    int count = 0;
-    while ((t & 1) == 0) {
-        count++;
-        t >>= 1;
+inline int MaxExtractableBit(int N) {
+    if (N <= 0) return -1;
+    int width = 0;
+    unsigned int x = static_cast<unsigned int>(N);
+    while (x != 0) {
+        width++;
+        x >>= 1;
     }
-    return count - 1;  // bits 0..count-1 are extractable
+    return width - 2;
 }
 
 // =============================================================
@@ -64,27 +70,30 @@ inline int MaxExtractableBit(int t) {
 //
 // f(m) = floor(m / 2^k) mod 2
 //
-// The output is encoded in BinaryScale (0 or Q/2) for binary representation.
-// The LUT is built with paper scale Q/t to ensure correct window coverage.
+// The output is encoded in BinaryScale (0 or Q/2). This C++ overload keeps the
+// existing t argument, but it intentionally supports only the Go-validated
+// t=2N paper-row semantics.
 //
 // Mirrors: func BuildKthBitTestVector(N, k int) Polynomial[uint64]
 // =============================================================
 template <class targetP>
 TFHEpp::Polynomial<targetP> BuildKthBitTestVector(int k, int t) {
-    static_assert(std::is_same_v<typename targetP::T, uint64_t>,
-                  "BuildKthBitTestVector requires uint64_t torus type");
-
-    if (k < 0 || k > MaxExtractableBit(t))
+    constexpr int N = targetP::n;
+    if (t != 2 * N)
+        throw std::invalid_argument("BuildKthBitTestVector currently requires t=2N");
+    if (k < 0 || k > MaxExtractableBit(N))
         throw std::invalid_argument("k out of range for given t");
 
-    // f(m) = (m >> k) & 1, encoded as 0 or Q/2 = BinaryScale
-    auto f = [k, t](int m) -> int {
-        m = ((m % t) + t) % t;
-        return (m >> k) & 1;
-    };
+    TFHEpp::Polynomial<targetP> tv = {};
+    for (int j = 0; j < N; j++)
+        if (((j >> k) & 1) == 1)
+            tv[j] = BinaryScaleT<typename targetP::T>;
+    return tv;
+}
 
-    // BuildMetaPBSTV uses paper scale Q/t
-    return BuildMetaPBSTV<targetP>(f, t);
+template <class targetP>
+TFHEpp::Polynomial<targetP> BuildKthBitTestVector(int k) {
+    return BuildKthBitTestVector<targetP>(k, 2 * targetP::n);
 }
 
 // =============================================================
@@ -98,16 +107,14 @@ TFHEpp::Polynomial<targetP> BuildLSBTestVector(int t) {
 }
 
 // =============================================================
-// DecodeBinaryOutput: decode a uint64_t phase to 0 or 1.
+// DecodeBinaryOutput: decode a T phase to 0 or 1.
 // Phase ≈ 0 → 0,  Phase ≈ BinaryScale = Q/2 → 1.
 // =============================================================
-inline int DecodeBinaryPhase(uint64_t phase) {
-    // Q/4 = BinaryScale/2: midpoint threshold
-    uint64_t threshold = BinaryScale / 2;
-    // Wrap phase to [0, Q/2) range
-    if (phase >= BinaryScale)
-        phase -= BinaryScale;
-    return (phase >= threshold) ? 1 : 0;
+template <typename T>
+inline int DecodeBinaryPhase(T phase) {
+    static_assert(std::is_unsigned_v<T>, "DecodeBinaryPhase expects unsigned torus type");
+    T binScale = BinaryScaleT<T>;
+    return static_cast<int>(((phase + binScale / 2) / binScale) & T(1));
 }
 
 // =============================================================
@@ -123,11 +130,11 @@ int DecodeBinaryCout(
     constexpr int N = P::n;
     constexpr int k_rank = P::k;
 
-    uint64_t phase = cout[k_rank * N];  // b term
+    typename P::T phase = cout[k_rank * N];  // b term
     for (int ki = 0; ki < k_rank; ki++)
         for (int i = 0; i < N; i++)
-            phase += cout[ki * N + i] *
-                     static_cast<uint64_t>(key[ki * N + i]);
+            phase -= cout[ki * N + i] *
+                     static_cast<typename P::T>(key[ki * N + i]);
 
     return DecodeBinaryPhase(phase);
 }
@@ -142,14 +149,8 @@ template <class P>
 int DecodeBinaryGLWE(
     const TFHEpp::TRLWE<P>& ct,
     const TFHEpp::Key<P>& key) {
-    constexpr int N = P::n;
-
-    // Phase = b[0] - sum_i A_i[0] * s_i[0]
-    uint64_t phase = ct[P::k][0];  // body[0]
-    for (uint32_t ki = 0; ki < P::k; ki++)
-        phase -= ct[ki][0] * static_cast<uint64_t>(key[ki * N + 0]);
-
-    return DecodeBinaryPhase(phase);
+    auto phase = TFHEpp::trlwePhase<P>(ct, key);
+    return DecodeBinaryPhase(phase[0]);
 }
 
 // =============================================================
@@ -171,7 +172,9 @@ ExtractKthBit(
     int k, int t,
     const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
     const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
-    const Algorithm1Config& cfg) {
+    const Algorithm1Config& cfg,
+    int first_blind_rotate_period = 0,
+    BlindRotatePruneStats* prune_stats = nullptr) {
     using tgtP = typename brP::targetP;
 
     // Build the k-th bit test vector
@@ -191,13 +194,15 @@ ExtractKthBit(
         redundancies[rnd + 1] = redundancies[rnd] * cfg.rounds[rnd].beta;
     }
 
-    // Initial BlindRotate with k-th bit TV
-    TFHEpp::TRLWE<tgtP> C0;
-    TFHEpp::BlindRotate<brP>(C0, ct, bkfft, tv);
-
     // Initial HomDivRem
     TFHEpp::TLWE<domP> cquo0, crem0;
     HomDivRemLWE<domP>(cquo0, crem0, ct, static_cast<typename domP::T>(2 * N));
+
+    // Initial BlindRotate with k-th bit TV from quotient coordinates.
+    TFHEpp::TRLWE<tgtP> C0;
+    BlindRotateGLWEFromQuotient<brP>(
+        C0, cquo0, MakeAccumulator<tgtP>(tv), bkfft, N,
+        first_blind_rotate_period, prune_stats);
 
     int current_mod = 2 * N;
     TFHEpp::TRLWE<tgtP> prev_GLWE = C0;
@@ -205,7 +210,8 @@ ExtractKthBit(
 
     for (int rnd = 0; rnd < cfg.K; rnd++) {
         const auto& round = cfg.rounds[rnd];
-        auto [a_k, b_k] = SymRange(redundancies[rnd]);
+        int a_k = -round.T;
+        int b_k = round.T;
         int delta_k = deltas[rnd];
 
         TFHEpp::TRLWE<tgtP> Ck_prime;
@@ -239,8 +245,12 @@ ExtractLSB(
     int t,
     const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
     const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
-    const Algorithm1Config& cfg) {
-    return ExtractKthBit<brP>(ct, 0, t, bkfft, trkeys, cfg);
+    const Algorithm1Config& cfg,
+    int first_blind_rotate_period = 0,
+    BlindRotatePruneStats* prune_stats = nullptr) {
+    return ExtractKthBit<brP>(
+        ct, 0, t, bkfft, trkeys, cfg,
+        first_blind_rotate_period, prune_stats);
 }
 
 }  // namespace MetaPBS2

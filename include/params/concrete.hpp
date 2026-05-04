@@ -84,6 +84,7 @@ using AHlvl1param = lvl1param;
 struct lvl2param {
     static constexpr int32_t key_value_max = 1;
     static constexpr int32_t key_value_min = -1;
+    static constexpr int32_t key_value_diff = key_value_max - key_value_min;
     static const std::uint32_t nbit = 10;  // dimension must be a power of 2 for
                                            // ease of polynomial multiplication.
     static constexpr std::uint32_t n = 1 << nbit;  // dimension
@@ -114,6 +115,7 @@ struct lvl2param {
 struct cblvl2param {
     static constexpr int32_t key_value_max = 1;
     static constexpr int32_t key_value_min = -1;
+    static constexpr int32_t key_value_diff = key_value_max - key_value_min;
     static const std::uint32_t nbit = 10;  // dimension must be a power of 2 for
                                            // ease of polynomial multiplication.
     static constexpr std::uint32_t n = 1 << nbit;  // dimension

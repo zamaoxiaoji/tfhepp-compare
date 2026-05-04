@@ -27,6 +27,8 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "gatebootstrapping.hpp"
@@ -41,6 +43,19 @@
 #include "metapbs2/trunc_repeat.hpp"
 
 namespace MetaPBS2 {
+
+template <typename T>
+inline std::make_signed_t<T> SignedTorus(T x) {
+    return static_cast<std::make_signed_t<T>>(x);
+}
+
+template <class targetP, typename Int>
+inline int Mod2N(Int x) {
+    const Int twoN = static_cast<Int>(2 * targetP::n);
+    Int r = x % twoN;
+    if (r < 0) r += twoN;
+    return static_cast<int>(r);
+}
 
 // =============================================================
 // RoundConfig: parameters for one Algorithm 1 round
@@ -61,6 +76,16 @@ struct Algorithm1Config {
     int t;          // Message modulus (= MessageModulus)
     std::vector<RoundConfig> rounds;   // length K
     // TR (TruncRepeat) gadget parameters baked into key generation
+};
+
+struct BlindRotatePruneStats {
+    std::uint64_t total = 0;    // CMUXes that would run without periodic pruning.
+    std::uint64_t skipped = 0;  // CMUXes skipped by period invariance.
+
+    std::uint64_t executed() const { return total - skipped; }
+    double prune_rate() const {
+        return total == 0 ? 0.0 : static_cast<double>(skipped) / static_cast<double>(total);
+    }
 };
 
 // =============================================================
@@ -122,26 +147,21 @@ void BlindRotateGLWE(
     const TFHEpp::BootstrappingKeyFFT<brP>& bkfft) {
     using tgtP = typename brP::targetP;
     using domP = typename brP::domainP;
-    using T = typename domP::T;
     constexpr int n = domP::k * domP::n;
-    constexpr int nbit = tgtP::nbit;
-    constexpr int bits = std::numeric_limits<T>::digits;
 
-    // ModSwitch b: round to nearest 2N value
-    auto modswitch = [&](T x) -> uint32_t {
-        return static_cast<uint32_t>(
-            (x >> (bits - 1 - nbit)) & ((uint32_t(1) << (nbit + 1)) - 1));
-    };
+    // Use TFHEpp's exact ModSwitch to accumulate rounding errors correctly
+    TFHEpp::ModswitchTLWE<domP> moded;
+    TFHEpp::BRModSwitch<brP, tgtP::nbit>(moded, ctLWE);
 
-    uint32_t b_bar = 2 * tgtP::n - modswitch(ctLWE[n]);
+    uint32_t b_bar = moded[n];
 
-    // Initial state: ctOut = X^{-b} * ctAcc = X^{b_bar} * ctAcc
+    // Initial state: ctOut = X^{b_bar} * ctAcc
     for (int k = 0; k <= (int)tgtP::k; k++)
         TFHEpp::PolynomialMulByXai<tgtP>(ctOut[k], ctAcc[k], b_bar);
 
     // CMUX for each coefficient
     for (int i = 0; i < n; i++) {
-        uint32_t a_bar = modswitch(ctLWE[i]);
+        uint32_t a_bar = moded[i];
         if (a_bar == 0) continue;
         TFHEpp::CMUXwithPolynomialMulByXaiMinusOne<brP>(ctOut, bkfft[i], a_bar);
     }
@@ -165,21 +185,33 @@ void BlindRotateGLWEFromQuotient(
     const TFHEpp::TLWE<typename brP::domainP>& cquo,
     const TFHEpp::TRLWE<typename brP::targetP>& ctAcc,
     const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
-    int N) {
+    int N,
+    int period = 0,
+    BlindRotatePruneStats* stats = nullptr) {
+    using tgtP = typename brP::targetP;
     using domP = typename brP::domainP;
-    using T = typename domP::T;
     constexpr int n = domP::k * domP::n;
-    constexpr int bits = std::numeric_limits<T>::digits;
+    const int twoN = 2 * tgtP::n;
+    (void)N;
 
-    // rescale = Q / (2N) = 2^(bits-1) / N
-    T rescale = (T(1) << (bits - 1)) / static_cast<T>(N);
+    if (period > 1 && twoN % period != 0)
+        throw std::invalid_argument("BlindRotateGLWEFromQuotient: period must divide 2N");
 
-    // Rescale each coordinate
-    TFHEpp::TLWE<domP> rescaled;
-    for (int i = 0; i <= n; i++)
-        rescaled[i] = cquo[i] * rescale;
+    int bbar = Mod2N<tgtP>(-SignedTorus(cquo[n]));
+    for (int k = 0; k <= static_cast<int>(tgtP::k); k++)
+        TFHEpp::PolynomialMulByXai<tgtP>(
+            ctOut[k], ctAcc[k], static_cast<typename tgtP::T>(bbar));
 
-    BlindRotateGLWE<brP>(ctOut, rescaled, ctAcc, bkfft);
+    for (int i = 0; i < n; i++) {
+        int abar = Mod2N<tgtP>(SignedTorus(cquo[i]));
+        if (abar == 0) continue;
+        if (stats) stats->total++;
+        if (period > 1 && abar % period == 0) {
+            if (stats) stats->skipped++;
+            continue;
+        }
+        TFHEpp::CMUXwithPolynomialMulByXaiMinusOne<brP>(ctOut, bkfft[i], abar);
+    }
 }
 
 // =============================================================
@@ -189,6 +221,13 @@ void BlindRotateGLWEFromQuotient(
 template <class P>
 void SampleExtractIndex0(TFHEpp::TLWE<P>& tlwe, const TFHEpp::TRLWE<P>& trlwe) {
     TFHEpp::SampleExtractIndex<P>(tlwe, trlwe, 0);
+}
+
+template <class P>
+TFHEpp::TRLWE<P> MakeAccumulator(const TFHEpp::Polynomial<P>& tv) {
+    TFHEpp::TRLWE<P> acc{};
+    acc[P::k] = tv;
+    return acc;
 }
 
 // =============================================================
@@ -214,7 +253,9 @@ RunAlgorithm1(
     std::function<int(int)> f,
     const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
     const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
-    const Algorithm1Config& cfg) {
+    const Algorithm1Config& cfg,
+    int first_blind_rotate_period = 0,
+    BlindRotatePruneStats* prune_stats = nullptr) {
     using tgtP = typename brP::targetP;
     using domP = typename brP::domainP;
     constexpr int N = tgtP::n;
@@ -234,13 +275,15 @@ RunAlgorithm1(
     // ---- Step 0: build test vector ----
     auto tv = BuildMetaPBSTV<tgtP>(f, cfg.t);
 
-    // ---- Step 1: initial BlindRotate (standard, from polynomial TV) ----
-    TFHEpp::TRLWE<tgtP> C0;
-    TFHEpp::BlindRotate<brP>(C0, ct, bkfft, tv);
-
     // ---- Step 1': initial HomDivRem on ct ----
     TFHEpp::TLWE<domP> cquo0, crem0;
     HomDivRemLWE<domP>(cquo0, crem0, ct, static_cast<typename domP::T>(2 * N));
+
+    // ---- Step 1: initial BlindRotate from the paper quotient ----
+    TFHEpp::TRLWE<tgtP> C0;
+    BlindRotateGLWEFromQuotient<brP>(
+        C0, cquo0, MakeAccumulator<tgtP>(tv), bkfft, N,
+        first_blind_rotate_period, prune_stats);
 
     // ---- Expansion rounds ----
     int current_mod = 2 * N;
@@ -249,7 +292,8 @@ RunAlgorithm1(
 
     for (int k = 0; k < cfg.K; k++) {
         const auto& rnd = cfg.rounds[k];
-        auto [a_k, b_k] = SymRange(redundancies[k]);
+        int a_k = -rnd.T;
+        int b_k = rnd.T;
         int delta_k = deltas[k];
 
         // Step 2k: TruncRepeat + delta shift

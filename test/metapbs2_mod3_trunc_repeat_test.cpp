@@ -169,11 +169,9 @@ static void test_hom_truncrepeat_encrypted() {
 
     std::mt19937 rng(99);
 
-    // Decrypt the constant coefficient of a TRLWE ciphertext
     auto decode_msg = [&](const TFHEpp::TRLWE<tgtP>& ct) -> int {
-        uint64_t phase = ct[tgtP::k][0];
-        for (uint32_t ki = 0; ki < tgtP::k; ki++)
-            phase -= ct[ki][0] * static_cast<uint64_t>(sk.key.get<tgtP>()[ki * N + 0]);
+        auto phase_poly = TFHEpp::trlwePhase<tgtP>(ct, sk.key.get<tgtP>());
+        uint64_t phase = phase_poly[0];
         return (int)((phase + delta / 2) / delta) % msgMod;
     };
 
@@ -203,7 +201,7 @@ static void test_hom_truncrepeat_encrypted() {
                trial, m, expected_msg, decoded, ok ? "PASS" : "FAIL");
         if (!ok) {
             fprintf(stderr, "FAIL: HomTruncRepeat decoding mismatch\n");
-            return;  // Skip remaining trials on failure - investigate noise model
+            exit(1);
         }
     }
     printf("  PASSED\n");

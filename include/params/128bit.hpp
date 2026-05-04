@@ -42,6 +42,7 @@ struct lvlhalfparam {
 struct lvl1param {
     static constexpr int32_t key_value_max = 1;
     static constexpr int32_t key_value_min = -1;
+    static constexpr int32_t key_value_diff = key_value_max - key_value_min;
     static constexpr std::uint32_t nbit =
         10;  // dimension must be a power of 2 for ease of polynomial
              // multiplication.
@@ -100,6 +101,7 @@ struct AHlvl1param {
 struct lvl2param {
     static constexpr int32_t key_value_max = 1;
     static constexpr int32_t key_value_min = -1;
+    static constexpr int32_t key_value_diff = key_value_max - key_value_min;
     static const std::uint32_t nbit = 11;  // dimension must be a power of 2 for
                                            // ease of polynomial multiplication.
     static constexpr std::uint32_t n = 1 << nbit;  // dimension
@@ -163,6 +165,7 @@ struct AHlvl2param {
 struct lvl3param {
     static constexpr int32_t key_value_max = 1;
     static constexpr int32_t key_value_min = -1;
+    static constexpr int32_t key_value_diff = key_value_max - key_value_min;
     static const std::uint32_t nbit = 12;  // dimension must be a power of 2 for
     // ease of polynomial multiplication.
     static constexpr std::uint32_t n = 1 << nbit;  // dimension = 4096
@@ -194,6 +197,7 @@ struct lvl3param {
 struct lvl4param {
     static constexpr int32_t key_value_max = 1;
     static constexpr int32_t key_value_min = -1;
+    static constexpr int32_t key_value_diff = key_value_max - key_value_min;
     static const std::uint32_t nbit = 13;  // dimension must be a power of 2 for
     // ease of polynomial multiplication.
     static constexpr std::uint32_t n = 1 << nbit;  // dimension

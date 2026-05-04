@@ -193,7 +193,9 @@ TruncPadKey<P> GenerateTruncPadKey(const TFHEpp::Key<P>& key) {
         // Encrypt s[i] as a constant polynomial (just s[i] at index 0)
         TFHEpp::Polynomial<P> si_poly = {};
         si_poly[0] = static_cast<typename P::T>(key[i]);
-        trkey[i] = TFHEpp::halftrgswfftSymEncrypt<P>(si_poly, key);
+        TFHEpp::HalfTRGSW<P> halftrgsw;
+        TFHEpp::halftrgswSymEncrypt<P>(halftrgsw, si_poly, P::α, key);
+        trkey[i] = TFHEpp::ApplyFFT2halftrgsw<P>(halftrgsw);
     }
     return trkey;
 }
@@ -225,7 +227,9 @@ TruncRepeatKey<P> GenerateTruncRepeatKey(const TFHEpp::Key<P>& key, int B) {
         for (int j = 0; j < (int)P::n; j++)
             si_sum[j] = si * sumPoly[j];
 
-        trkey[i] = TFHEpp::halftrgswfftSymEncrypt<P>(si_sum, key);
+        TFHEpp::HalfTRGSW<P> halftrgsw;
+        TFHEpp::halftrgswSymEncrypt<P>(halftrgsw, si_sum, P::α, key);
+        trkey[i] = TFHEpp::ApplyFFT2halftrgsw<P>(halftrgsw);
     }
     return trkey;
 }
@@ -272,7 +276,7 @@ void HomTruncPad(TFHEpp::TRLWE<P>& result,
 
             // External product: <G⁻¹(tp), RLev(s[i])>
             TFHEpp::TRLWE<P> contribution;
-            TFHEpp::halftrgswfftExternalProduct<P>(contribution, tp, it->second);
+            TFHEpp::ExternalProduct<P>(contribution, tp, it->second);
 
             // Accumulate (subtract: TFHEpp uses B = A·s + M + e convention)
             for (int comp = 0; comp <= (int)P::k; comp++)
@@ -328,7 +332,7 @@ void HomTruncRepeat(TFHEpp::TRLWE<P>& result,
 
             // External product: <G⁻¹(tp), RLev(s[i]·sumPoly)>
             TFHEpp::TRLWE<P> contribution;
-            TFHEpp::halftrgswfftExternalProduct<P>(contribution, tp, it->second);
+            TFHEpp::ExternalProduct<P>(contribution, tp, it->second);
 
             // Accumulate (subtract)
             for (int comp = 0; comp <= (int)P::k; comp++)

@@ -196,18 +196,17 @@ static void test_extract_kth_bit_api() {
         domP::α, sk.key.get<domP>());
 
     printf("  Extracting bit 0 (LSB)...\n");
+    const int p = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
     BlindRotatePruneStats lsb_stats;
-    auto cout_lsb = ExtractLSB<brP>(enc_ct, cfg.t,
-                                     *bkfft, trkeys, cfg,
-                                     /*first_blind_rotate_period=*/2,
-                                     &lsb_stats);
+    auto cout_lsb = BitExtract<brP>(
+        enc_ct, *bkfft, trkeys, cfg,
+        /*p=*/p, /*k=*/p - 1, &lsb_stats);
 
     printf("  Extracting bit 1...\n");
     BlindRotatePruneStats bit1_stats;
-    auto cout_b1 = ExtractKthBit<brP>(enc_ct, 1, cfg.t,
-                                       *bkfft, trkeys, cfg,
-                                       /*first_blind_rotate_period=*/4,
-                                       &bit1_stats);
+    auto cout_b1 = BitExtract<brP>(
+        enc_ct, *bkfft, trkeys, cfg,
+        /*p=*/p, /*k=*/p - 2, &bit1_stats);
     (void)cout_b1;
 
     printf("  Output TLWE<lvl2> size = %zu\n", cout_lsb.size());

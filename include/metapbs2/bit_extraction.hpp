@@ -65,6 +65,39 @@ inline int MaxExtractableBit(int N) {
     return width - 2;
 }
 
+struct BitExtractOptions {
+    int p;       // Message precision. For the current exact path, cfg.t = 2^p = 2N.
+    int k;       // Chapter-3 bit index: k=0 is the top/sign bit, k=p-1 is LSB.
+    bool enable_periodic_pruning = true;
+    int period = 0;  // 0 means derive M_k from p,k; otherwise use this pruning period.
+};
+
+inline int CheckedPowerOfTwo(int exponent) {
+    if (exponent < 0 || exponent >= static_cast<int>(std::numeric_limits<int>::digits))
+        throw std::invalid_argument("power-of-two exponent out of int range");
+    return int(1) << exponent;
+}
+
+inline int LSBIndexFromChapterBit(int p, int k) {
+    if (p <= 0)
+        throw std::invalid_argument("BitExtract requires positive message precision p");
+    if (k < 0 || k >= p)
+        throw std::invalid_argument("BitExtract bit index k out of range for p");
+    return p - 1 - k;
+}
+
+inline int BitExtractPeriodFromChapterBit(int p, int k) {
+    return CheckedPowerOfTwo(LSBIndexFromChapterBit(p, k) + 1);
+}
+
+inline int MessagePrecisionFromPowerOfTwoModulus(int t) {
+    if (t <= 0 || (t & (t - 1)) != 0)
+        throw std::invalid_argument("message modulus must be a positive power of two");
+    int p = 0;
+    while ((int(1) << p) < t) p++;
+    return p;
+}
+
 // =============================================================
 // BuildKthBitTestVector: LUT for extracting the k-th bit of m ∈ Z_t.
 //
@@ -251,6 +284,65 @@ ExtractLSB(
     return ExtractKthBit<brP>(
         ct, 0, t, bkfft, trkeys, cfg,
         first_blind_rotate_period, prune_stats);
+}
+
+// =============================================================
+// BitExtract: Chapter-3 periodic-pruned iterative bit extraction.
+//
+// This is the paper-facing wrapper for algorithm
+// alg:full_periodic_pruned_iterative_pbs:
+//   1. Interpret k in the Chapter-3/MSB-side convention.
+//   2. Compute w_k=2^{p-1-k} and M_k=2w_k automatically.
+//   3. Run the Meta-PBS exact extraction path.
+//   4. Apply M_k-periodic pruning only in the first blind rotation.
+//
+// The current exact implementation supports the t=2N paper row. Thus cfg.t
+// must equal 2^p and the converted LSB-side bit must be in the supported range.
+// =============================================================
+template <class brP>
+TFHEpp::TLWE<typename brP::targetP>
+BitExtract(
+    const TFHEpp::TLWE<typename brP::domainP>& ct,
+    const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
+    const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
+    const Algorithm1Config& cfg,
+    const BitExtractOptions& options,
+    BlindRotatePruneStats* prune_stats = nullptr) {
+    using tgtP = typename brP::targetP;
+    constexpr int N = tgtP::n;
+
+    if (cfg.t != CheckedPowerOfTwo(options.p))
+        throw std::invalid_argument("BitExtract requires cfg.t == 2^p");
+    if (cfg.t != 2 * N)
+        throw std::invalid_argument("BitExtract currently supports only cfg.t=2N");
+
+    int lsb_k = LSBIndexFromChapterBit(options.p, options.k);
+    if (lsb_k > MaxExtractableBit(N))
+        throw std::invalid_argument("BitExtract requested bit is not supported by 0/Q/2 negacyclic encoding");
+
+    int first_period = 0;
+    if (options.enable_periodic_pruning)
+        first_period = options.period > 0
+                           ? options.period
+                           : BitExtractPeriodFromChapterBit(options.p, options.k);
+
+    return ExtractKthBit<brP>(
+        ct, lsb_k, cfg.t, bkfft, trkeys, cfg, first_period, prune_stats);
+}
+
+template <class brP>
+TFHEpp::TLWE<typename brP::targetP>
+BitExtract(
+    const TFHEpp::TLWE<typename brP::domainP>& ct,
+    const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
+    const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
+    const Algorithm1Config& cfg,
+    int p, int k,
+    BlindRotatePruneStats* prune_stats = nullptr) {
+    return BitExtract<brP>(
+        ct, bkfft, trkeys, cfg,
+        BitExtractOptions{.p = p, .k = k},
+        prune_stats);
 }
 
 }  // namespace MetaPBS2

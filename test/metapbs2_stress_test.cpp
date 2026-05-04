@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 #include <random>
 
@@ -23,6 +25,71 @@ static double elapsed_ms(std::chrono::steady_clock::time_point start,
 
 static int kth_bit_period(int k) {
     return 1 << (k + 1);
+}
+
+static int chapter_bit_from_lsb_bit(int p, int lsb_k) {
+    return p - 1 - lsb_k;
+}
+
+static uint64_t abs_diff_u64(uint64_t a, uint64_t b) {
+    return a >= b ? a - b : b - a;
+}
+
+static uint64_t binary_decision_margin(uint64_t phase) {
+    const uint64_t q4 = BinaryScale / 2;
+    const uint64_t three_q4 = BinaryScale + q4;
+    uint64_t d1 = abs_diff_u64(phase, q4);
+    uint64_t d2 = abs_diff_u64(phase, three_q4);
+    return d1 < d2 ? d1 : d2;
+}
+
+static double normalized_binary_margin(uint64_t phase) {
+    return static_cast<double>(binary_decision_margin(phase)) /
+           static_cast<double>(BinaryScale / 2);
+}
+
+template <typename Fn>
+static void expect_invalid_argument(const char* name, Fn&& fn) {
+    try {
+        fn();
+    } catch (const std::invalid_argument&) {
+        printf("  %s: rejected\n", name);
+        return;
+    }
+    printf("  FAIL: %s was accepted\n", name);
+    exit(1);
+}
+
+static void test_bitextract_parameter_robustness() {
+    printf("[Robustness] BitExtract parameter checks\n");
+    if (MessagePrecisionFromPowerOfTwoModulus(4096) != 12) {
+        printf("  FAIL: p(log2 4096) should be 12\n");
+        exit(1);
+    }
+    if (LSBIndexFromChapterBit(12, 11) != 0 ||
+        BitExtractPeriodFromChapterBit(12, 11) != 2) {
+        printf("  FAIL: Chapter bit k=11 should map to LSB and period=2\n");
+        exit(1);
+    }
+    if (LSBIndexFromChapterBit(12, 10) != 1 ||
+        BitExtractPeriodFromChapterBit(12, 10) != 4) {
+        printf("  FAIL: Chapter bit k=10 should map to LSB-index 1 and period=4\n");
+        exit(1);
+    }
+
+    expect_invalid_argument("non-power-of-two t", [] {
+        (void)MessagePrecisionFromPowerOfTwoModulus(4095);
+    });
+    expect_invalid_argument("negative k", [] {
+        (void)LSBIndexFromChapterBit(12, -1);
+    });
+    expect_invalid_argument("k >= p", [] {
+        (void)LSBIndexFromChapterBit(12, 12);
+    });
+    expect_invalid_argument("unsupported top bit", [] {
+        (void)BuildKthBitTestVector<TFHEpp::lvl2param>(11, 2 * TFHEpp::lvl2param::n);
+    });
+    printf("  PASSED\n");
 }
 
 // ---------------------------------------------------------------
@@ -76,6 +143,31 @@ struct br_lvl22param {
 #endif
 };
 
+static void test_bitextract_wrapper_rejections() {
+    printf("[Robustness] BitExtract wrapper rejection checks\n");
+    using brP = br_lvl22param;
+    using domP = TFHEpp::lvl2param;
+    using tgtP = TFHEpp::lvl2param;
+
+    auto cfg = PaperRowT2NConfig();
+    const int p = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
+    TFHEpp::TLWE<domP> ct{};
+    auto bkfft = std::make_unique<TFHEpp::BootstrappingKeyFFT<brP>>();
+    std::vector<TruncRepeatKey<tgtP>> trkeys;
+
+    expect_invalid_argument("unsupported Chapter/MSB top bit", [&] {
+        (void)BitExtract<brP>(
+            ct, *bkfft, trkeys, cfg,
+            BitExtractOptions{.p = p, .k = 0});
+    });
+    expect_invalid_argument("period not dividing 2N", [&] {
+        (void)BitExtract<brP>(
+            ct, *bkfft, trkeys, cfg,
+            BitExtractOptions{.p = p, .k = p - 1, .period = 3});
+    });
+    printf("  PASSED\n");
+}
+
 // ---------------------------------------------------------------
 // Stress test 2: Sampled test on Paper params (lvl22)
 // Testing t=4096 with representative edge cases and random sampling.
@@ -87,6 +179,7 @@ void stress_test_paper_params() {
     using brP = br_lvl22param;
 
     auto cfg = PaperRowT2NConfig();
+    const int p = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
 
     // Private-key holder / setup side: excluded from server-side extraction time.
     TFHEpp::SecretKey sk;
@@ -108,6 +201,11 @@ void stress_test_paper_params() {
     double total_baseline_extract_ms = 0.0;
     double total_pruned_extract_ms = 0.0;
     BlindRotatePruneStats all_stats{};
+    double total_baseline_margin = 0.0;
+    double total_pruned_margin = 0.0;
+    double min_baseline_margin = 1.0;
+    double min_pruned_margin = 1.0;
+    int margin_count = 0;
 
     for (int k = 0; k <= max_k; k++) {
         std::vector<int> msgs_to_test = {0, 1, cfg.t - 1, (1 << k), (1 << k) - 1};
@@ -142,6 +240,10 @@ void stress_test_paper_params() {
         double baseline_extract_ms = 0.0;
         double pruned_extract_ms = 0.0;
         BlindRotatePruneStats bit_stats{};
+        double bit_baseline_margin = 0.0;
+        double bit_pruned_margin = 0.0;
+        double bit_min_baseline_margin = 1.0;
+        double bit_min_pruned_margin = 1.0;
         printf("  Testing bit %d period=%d (%zu samples)... ",
                k, kth_bit_period(k), samples.size());
         fflush(stdout);
@@ -150,15 +252,25 @@ void stress_test_paper_params() {
             // Server-side timed window: from input ciphertext to output bit ciphertext.
             // It includes bootstrap, TruncRepeat correction rounds, and optional pruning.
             auto t0 = std::chrono::steady_clock::now();
-            auto cout_baseline = ExtractKthBit<brP>(
-                sample.ct, k, cfg.t, *bkfft, trkeys, cfg);
+            auto cout_baseline = BitExtract<brP>(
+                sample.ct, *bkfft, trkeys, cfg,
+                BitExtractOptions{
+                    .p = p,
+                    .k = chapter_bit_from_lsb_bit(p, k),
+                    .enable_periodic_pruning = false,
+                });
             auto t1 = std::chrono::steady_clock::now();
 
             BlindRotatePruneStats stats;
             auto t2 = std::chrono::steady_clock::now();
-            auto cout_pruned = ExtractKthBit<brP>(
-                sample.ct, k, cfg.t, *bkfft, trkeys, cfg,
-                kth_bit_period(k), &stats);
+            auto cout_pruned = BitExtract<brP>(
+                sample.ct, *bkfft, trkeys, cfg,
+                BitExtractOptions{
+                    .p = p,
+                    .k = chapter_bit_from_lsb_bit(p, k),
+                    .enable_periodic_pruning = true,
+                },
+                &stats);
             auto t3 = std::chrono::steady_clock::now();
 
             baseline_extract_ms += elapsed_ms(t0, t1);
@@ -173,6 +285,14 @@ void stress_test_paper_params() {
                 TFHEpp::tlweSymPhase<tgtP>(cout_pruned, sk.key.get<tgtP>());
             int baseline_bit = DecodeBinaryPhase(baseline_phase);
             int pruned_bit = DecodeBinaryPhase(pruned_phase);
+            double baseline_margin = normalized_binary_margin(baseline_phase);
+            double pruned_margin = normalized_binary_margin(pruned_phase);
+            bit_baseline_margin += baseline_margin;
+            bit_pruned_margin += pruned_margin;
+            bit_min_baseline_margin =
+                baseline_margin < bit_min_baseline_margin ? baseline_margin : bit_min_baseline_margin;
+            bit_min_pruned_margin =
+                pruned_margin < bit_min_pruned_margin ? pruned_margin : bit_min_pruned_margin;
 
             if (baseline_bit == sample.expected_bit && pruned_bit == sample.expected_bit) {
                 pass++;
@@ -191,15 +311,27 @@ void stress_test_paper_params() {
         if (fail == 0)
             printf("OK prune=%.2f%% skipped=%lu/%lu "
                    "server_extract_baseline=%.2fms server_extract_pruned=%.2fms "
-                   "speedup=%.2fx\n",
+                   "speedup=%.2fx margin_min(base/pruned)=%.3f/%.3f "
+                   "margin_avg(base/pruned)=%.3f/%.3f\n",
                    100.0 * bit_stats.prune_rate(),
                    bit_stats.skipped, bit_stats.total,
-                   baseline_extract_ms, pruned_extract_ms, speedup);
+                   baseline_extract_ms, pruned_extract_ms, speedup,
+                   bit_min_baseline_margin, bit_min_pruned_margin,
+                   bit_baseline_margin / pass, bit_pruned_margin / pass);
         else
             printf("FAILED\n");
 
         total_pass += pass;
         total_fail += fail;
+        total_baseline_margin += bit_baseline_margin;
+        total_pruned_margin += bit_pruned_margin;
+        min_baseline_margin = bit_min_baseline_margin < min_baseline_margin
+                                  ? bit_min_baseline_margin
+                                  : min_baseline_margin;
+        min_pruned_margin = bit_min_pruned_margin < min_pruned_margin
+                                ? bit_min_pruned_margin
+                                : min_pruned_margin;
+        margin_count += pass;
         total_baseline_extract_ms += baseline_extract_ms;
         total_pruned_extract_ms += pruned_extract_ms;
         all_stats.total += bit_stats.total;
@@ -215,13 +347,117 @@ void stress_test_paper_params() {
            total_pruned_extract_ms > 0.0
                ? total_baseline_extract_ms / total_pruned_extract_ms
                : 0.0);
+    printf("  Accuracy: %.6f%% (%d/%d)\n",
+           100.0 * static_cast<double>(total_pass) /
+               static_cast<double>(total_pass + total_fail),
+           total_pass, total_pass + total_fail);
+    printf("  Robustness margin: min(base/pruned)=%.3f/%.3f avg(base/pruned)=%.3f/%.3f\n",
+           min_baseline_margin, min_pruned_margin,
+           total_baseline_margin / margin_count, total_pruned_margin / margin_count);
+    if (min_baseline_margin <= 0.05 || min_pruned_margin <= 0.05) {
+        printf("  FAIL: binary decision margin below 5%% of half-cell radius\n");
+        exit(1);
+    }
     if (total_fail > 0) exit(1);
+}
+
+void robustness_test_multikey_samples() {
+    printf("[Robustness] Multi-key sampled correctness (pruned BitExtract)\n");
+    using tgtP = TFHEpp::lvl2param;
+    using domP = TFHEpp::lvl2param;
+    using brP = br_lvl22param;
+
+    auto cfg = PaperRowT2NConfig();
+    const int p = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
+    const int B1 = cfg.rounds[0].beta;
+    const int B2 = cfg.rounds[1].beta;
+    const std::vector<int> lsb_bits = {0, 1, 2, 5, 10};
+    const std::vector<int> base_messages = {0, 1, cfg.t - 1, cfg.t / 2, cfg.t / 2 - 1};
+
+    int total_pass = 0;
+    int total_fail = 0;
+    double min_margin = 1.0;
+    double sum_margin = 0.0;
+
+    for (int key_round = 0; key_round < 3; key_round++) {
+        TFHEpp::SecretKey sk;
+        auto bkfft = std::make_unique<TFHEpp::BootstrappingKeyFFT<brP>>();
+        TFHEpp::bkfftgen<brP>(*bkfft, sk);
+        auto trkey1 = GenerateTruncRepeatKey<tgtP>(sk.key.get<tgtP>(), B1);
+        auto trkey2 = GenerateTruncRepeatKey<tgtP>(sk.key.get<tgtP>(), B2);
+        std::vector<TruncRepeatKey<tgtP>> trkeys = {std::move(trkey1), std::move(trkey2)};
+
+        std::mt19937 rng(9000 + key_round);
+        int round_pass = 0;
+        int round_fail = 0;
+        for (int lsb_k : lsb_bits) {
+            std::vector<int> messages = base_messages;
+            messages.push_back(1 << lsb_k);
+            messages.push_back((1 << (lsb_k + 1)) - 1);
+            messages.push_back(rng() % cfg.t);
+            messages.push_back(rng() % cfg.t);
+
+            for (int m : messages) {
+                TFHEpp::TLWE<domP> ct;
+                TFHEpp::tlweSymEncrypt<domP>(
+                    ct,
+                    static_cast<typename domP::T>(m) *
+                        (((~typename domP::T(0)) / typename domP::T(cfg.t)) + 1),
+                    domP::α, sk.key.get<domP>());
+
+                BlindRotatePruneStats stats;
+                auto cout = BitExtract<brP>(
+                    ct, *bkfft, trkeys, cfg,
+                    BitExtractOptions{
+                        .p = p,
+                        .k = chapter_bit_from_lsb_bit(p, lsb_k),
+                        .enable_periodic_pruning = true,
+                    },
+                    &stats);
+                auto phase = TFHEpp::tlweSymPhase<tgtP>(cout, sk.key.get<tgtP>());
+                int got = DecodeBinaryPhase(phase);
+                int want = (m >> lsb_k) & 1;
+                double margin = normalized_binary_margin(phase);
+                min_margin = margin < min_margin ? margin : min_margin;
+                sum_margin += margin;
+                if (got == want) {
+                    round_pass++;
+                } else {
+                    printf("  FAIL key_round=%d bit=%d m=%d want=%d got=%d margin=%.3f\n",
+                           key_round, lsb_k, m, want, got, margin);
+                    round_fail++;
+                }
+            }
+        }
+        total_pass += round_pass;
+        total_fail += round_fail;
+        printf("  key_round=%d accuracy=%.6f%% (%d/%d)\n",
+               key_round,
+               100.0 * static_cast<double>(round_pass) /
+                   static_cast<double>(round_pass + round_fail),
+               round_pass, round_pass + round_fail);
+    }
+
+    printf("  Total accuracy=%.6f%% (%d/%d), margin_min=%.3f margin_avg=%.3f\n",
+           100.0 * static_cast<double>(total_pass) /
+               static_cast<double>(total_pass + total_fail),
+           total_pass, total_pass + total_fail,
+           min_margin,
+           sum_margin / static_cast<double>(total_pass + total_fail));
+    if (total_fail > 0) exit(1);
+    if (min_margin <= 0.05) {
+        printf("  FAIL: multi-key margin below 5%% of half-cell radius\n");
+        exit(1);
+    }
 }
 
 int main() {
     printf("=== MetaPBS2 Stress Test ===\n");
+    test_bitextract_parameter_robustness();
+    test_bitextract_wrapper_rejections();
     stress_test_exhaustive_plaintext_data();
     stress_test_paper_params();
+    robustness_test_multikey_samples();
     printf("=== ALL STRESS TESTS PASSED ===\n");
     return 0;
 }

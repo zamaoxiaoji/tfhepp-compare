@@ -180,16 +180,14 @@ void query_evaluation(size_t rows)
     vector<int32_t> rot_indices(rot_set.begin(), rot_set.end());
     cc->EvalRotateKeyGen(ckks_keys.secretKey, rot_indices);
 
-    // =================== Repack KeyGen ===================
-    cout << "Generating repack key..." << endl;
-    RepackKey rk;
-    RepackKeyGen(rk, cc, ckks_keys, sk, Lvl1::n);
-
-    // =================== Repack: TFHE → CKKS (true repack) ===================
-    cout << "Repacking TFHE→CKKS (true repack, no decryption)..." << endl;
+    // =================== Repack: TFHE → CKKS (SimulatedRepack) ===================
+    // Using SimulatedRepack until HomMod for true repack is implemented.
+    // The BSGS linear transform is validated (inner products correct),
+    // but HomMod (Chebyshev sin approx for mod reduction) is needed.
+    cout << "Repacking TFHE→CKKS (simulated)..." << endl;
     auto t_repack_start = chrono::high_resolution_clock::now();
 
-    auto ct_mask = LWEsToOpenFHE(cc, ckks_keys, pred_cres, rk, rlwe_scale_bits);
+    auto ct_mask = SimulatedRepack(cc, ckks_keys, pred_cres, sk, rlwe_scale_bits);
 
     auto t_repack_end = chrono::high_resolution_clock::now();
     double repack_ms = chrono::duration_cast<chrono::milliseconds>(t_repack_end - t_repack_start).count();

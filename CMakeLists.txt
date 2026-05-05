@@ -205,6 +205,11 @@ if(OpenFHE_FOUND)
     add_executable(tpch_q14 test/tpch_q14.cpp)
     target_link_libraries(tpch_q14 hedb tfhe++ ${OpenFHE_SHARED_LIBRARIES})
     target_compile_options(tpch_q14 PRIVATE -Wno-deprecated-declarations)
+
+    # Repack test
+    add_executable(repack_test test/repack_test.cpp)
+    target_link_libraries(repack_test hedb tfhe++ ${OpenFHE_SHARED_LIBRARIES})
+    target_compile_options(repack_test PRIVATE -Wno-deprecated-declarations)
 else()
     message(STATUS "OpenFHE not found, TPC-H query tests will not be built")
 endif()

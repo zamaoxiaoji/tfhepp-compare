@@ -10,8 +10,8 @@
 #include <iostream>
 #include <chrono>
 #include <random>
-#include <iomanip>
 #include <cmath>
+#include <set>
 #include "../src/HEDB/comparison/HomCompare.h"
 #include "../src/HEDB/conversion/repack_openfhe.h"
 
@@ -146,7 +146,11 @@ void query_evaluation(size_t rows)
     CCParams<CryptoContextCKKSRNS> params;
     params.SetMultiplicativeDepth(15);
     params.SetScalingModSize(50);
-    params.SetBatchSize(rows);
+    // BatchSize must be >= max(rows, Lvl1::n) for BSGS diagonal vectors
+    size_t batch_size = std::max(rows, (size_t)Lvl1::n);
+    // Round up to next power of 2
+    size_t bs = 1; while (bs < batch_size) bs <<= 1;
+    params.SetBatchSize(bs);
     params.SetSecurityLevel(HEStd_128_classic);
 
     auto cc = GenCryptoContext(params);
@@ -157,25 +161,35 @@ void query_evaluation(size_t rows)
     auto ckks_keys = cc->KeyGen();
     cc->EvalMultKeyGen(ckks_keys.secretKey);
 
-    // Generate rotation keys for RotateAndSum
-    vector<int32_t> rot_indices;
-    for (size_t step = 1; step < rows; step <<= 1) {
-        rot_indices.push_back((int32_t)step);
-        rot_indices.push_back(-(int32_t)step);
+    // Generate rotation keys: RotateAndSum + BSGS baby+giant steps + folding
+    std::set<int32_t> rot_set;
+    for (size_t step = 1; step < bs; step <<= 1) {
+        rot_set.insert((int32_t)step);
+        rot_set.insert(-(int32_t)step);
     }
-    // Also need rotation keys for BSGS
-    size_t g_tilde = CeilSqrt(Lvl1::n);
-    for (size_t i = 1; i < g_tilde; i++) {
-        rot_indices.push_back((int32_t)i);
-    }
+    size_t min_dim = std::min(rows, (size_t)Lvl1::n);
+    size_t g_tilde = CeilSqrt(min_dim);
+    size_t b_tilde = CeilDiv(min_dim, g_tilde);
+    // Baby steps
+    for (size_t i = 1; i < g_tilde; i++) rot_set.insert((int32_t)i);
+    // Giant steps
+    for (size_t b = 1; b < b_tilde; b++) rot_set.insert((int32_t)(b * g_tilde));
+    // Folding rotations (log2 only) for rectangular matrix
+    for (size_t j = 0; (1UL << j) * rows < (size_t)Lvl1::n; j++)
+        rot_set.insert((int32_t)((1U << j) * rows));
+    vector<int32_t> rot_indices(rot_set.begin(), rot_set.end());
     cc->EvalRotateKeyGen(ckks_keys.secretKey, rot_indices);
 
-    // =================== Repack: TFHE → CKKS ===================
-    cout << "Repacking TFHE→CKKS (simulated for now)..." << endl;
+    // =================== Repack KeyGen ===================
+    cout << "Generating repack key..." << endl;
+    RepackKey rk;
+    RepackKeyGen(rk, cc, ckks_keys, sk, Lvl1::n);
+
+    // =================== Repack: TFHE → CKKS (true repack) ===================
+    cout << "Repacking TFHE→CKKS (true repack, no decryption)..." << endl;
     auto t_repack_start = chrono::high_resolution_clock::now();
 
-    // Use simulated repack (decrypt TLWE → encrypt CKKS) for correctness validation
-    auto ct_mask = SimulatedRepack(cc, ckks_keys, pred_cres, sk, rlwe_scale_bits);
+    auto ct_mask = LWEsToOpenFHE(cc, ckks_keys, pred_cres, rk, rlwe_scale_bits);
 
     auto t_repack_end = chrono::high_resolution_clock::now();
     double repack_ms = chrono::duration_cast<chrono::milliseconds>(t_repack_end - t_repack_start).count();

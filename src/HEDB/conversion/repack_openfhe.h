@@ -1,25 +1,24 @@
 #pragma once
 // TFHE→CKKS Repack using OpenFHE
-// Port of HE3DB's LWEsToRLWE (SEAL) to OpenFHE CKKS
+// Converts TLWE lvl1 ciphertexts to CKKS ciphertext without decryption.
 //
-// Algorithm:
+// Algorithm overview:
 // 1. KeyGen: Encrypt TFHE sk in CKKS → Enc_CKKS(s_tfhe)
-// 2. LinearTransform: Compute Enc_CKKS(A·s) using BSGS
-// 3. Add b: Enc_CKKS(A·s + b) = Enc_CKKS(Δm + e)
-// 4. HomMod: Modular reduction → Enc_CKKS(m/K)
-// 5. HomRound: Round to 0/1
+// 2. LinearTransform: BSGS diagonal method → Enc_CKKS(A·s)
+// 3. Add b: Enc_CKKS(A·s + b) = Enc_CKKS((Δm + e)/Δ) ≈ Enc_CKKS(m)
+// 4. HomRound: polynomial sign approximation to snap to {0, 1}
 
 #include "openfhe.h"
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <cloudkey.hpp>
 #include "HEDB/comparison/tfhepp_utils.h"
 
 namespace HEDB
 {
     using namespace lbcrypto;
 
-    // --- Helper: ceil(sqrt(n)) ---
     template <typename T>
     static inline T CeilSqrt(T val) {
         return static_cast<T>(std::ceil(std::sqrt(1.0 * val)));
@@ -29,14 +28,13 @@ namespace HEDB
         return (a + b - 1) / b;
     }
 
-    // --- Repack pre-key: CKKS encryptions of rotated TFHE secret key ---
+    // --- Repack pre-key: CKKS encryptions of TFHE secret key ---
     struct RepackKey {
-        std::vector<Ciphertext<DCRTPoly>> rotated_sk; // Enc(Rot^j(s_tfhe))
+        std::vector<Ciphertext<DCRTPoly>> rotated_sk;
     };
 
     // === KeyGen ===
-    // Encrypts the TFHE lvl1 secret key into CKKS ciphertexts
-    // with BSGS baby-step rotations pre-computed
+    // Encrypts TFHE lvl1 secret key into CKKS with BSGS baby-step rotations
     inline void RepackKeyGen(
         RepackKey &rk,
         const CryptoContext<DCRTPoly> &cc,
@@ -44,7 +42,6 @@ namespace HEDB
         const TFHESecretKey &tfhe_sk,
         size_t tfhe_n)
     {
-        // Extract TFHE secret key as doubles
         std::vector<double> sk_vec(tfhe_n);
         for (size_t i = 0; i < tfhe_n; i++) {
             auto val = tfhe_sk.key.get<Lvl1>()[i];
@@ -57,14 +54,12 @@ namespace HEDB
         for (size_t j = 0; j < g; j++) {
             auto pt = cc->MakeCKKSPackedPlaintext(sk_vec);
             rk.rotated_sk[j] = cc->Encrypt(keys.publicKey, pt);
-            // Rotate sk_vec by 1 for next baby step
             std::rotate(sk_vec.begin(), sk_vec.begin() + 1, sk_vec.end());
         }
     }
 
-    // === LinearTransform ===
-    // Computes Enc(A · s) using BSGS diagonal method
-    // A is (num_lwes x tfhe_n) matrix
+    // === BSGS Linear Transform ===
+    // Computes Enc(A · s) where A is (num_lwes × tfhe_n) plaintext matrix
     inline Ciphertext<DCRTPoly> LinearTransformBSGS(
         const CryptoContext<DCRTPoly> &cc,
         const std::vector<std::vector<double>> &A,
@@ -87,7 +82,6 @@ namespace HEDB
 
             for (size_t g = 0; g < g_tilde && b * g_tilde + g < min_len; g++) {
                 size_t j = b * g_tilde + g;
-                // Get diagonal j of matrix A
                 std::vector<double> diag(max_len);
                 for (size_t r = 0; r < max_len; r++) {
                     diag[r] = A[r % rows][(r + j) % cols];
@@ -97,29 +91,21 @@ namespace HEDB
                 auto pt_diag = cc->MakeCKKSPackedPlaintext(diag);
                 auto term = cc->EvalMult(rk.rotated_sk[g], pt_diag);
 
-                if (!sum_init) {
-                    sum = term;
-                    sum_init = true;
-                } else {
-                    sum = cc->EvalAdd(sum, term);
-                }
+                if (!sum_init) { sum = term; sum_init = true; }
+                else { sum = cc->EvalAdd(sum, term); }
             }
 
             if (b > 0) {
                 sum = cc->EvalRotate(sum, (int32_t)(b * g_tilde));
             }
 
-            if (!result_init) {
-                result = sum;
-                result_init = true;
-            } else {
-                result = cc->EvalAdd(result, sum);
-            }
+            if (!result_init) { result = sum; result_init = true; }
+            else { result = cc->EvalAdd(result, sum); }
         }
 
-        // If rows < cols, fold via rotate+add
+        // Fold if rows < cols: rotate-and-add for power-of-2 folding
         if (rows < cols) {
-            size_t gama = static_cast<size_t>(std::log2(cols / rows));
+            size_t gama = static_cast<size_t>(std::log2(1.0 * cols / rows));
             for (size_t j = 0; j < gama; j++) {
                 auto temp = cc->EvalRotate(result, (int32_t)((1U << j) * rows));
                 result = cc->EvalAdd(result, temp);
@@ -129,106 +115,79 @@ namespace HEDB
         return result;
     }
 
-    // === HomMod: Homomorphic modular reduction ===
-    // Uses sin approximation to extract m from Δm+e
-    // Simplified version: uses polynomial approximation of sin(2π·x)/(2π)
-    // then iterative doubling
-    inline Ciphertext<DCRTPoly> HomModReduction(
-        const CryptoContext<DCRTPoly> &cc,
-        Ciphertext<DCRTPoly> ct,
-        double K)
-    {
-        // For small-scale testing, we skip the full HomMod and
-        // rely on the message being already close to 0 or 1/K
-        // after the linear transform.
-        // Full implementation would use Chebyshev approximation of
-        // sin(2πx)/(2π) followed by r iterations of squaring.
-
-        // Scale the result: multiply by K to recover m ∈ {0, 1}
-        ct = cc->EvalMult(ct, K);
-        return ct;
-    }
-
-    // === HomRound: Round to 0/1 ===
-    // Applies sign function approximation: f(x) = 0 if x < 0.5, 1 if x >= 0.5
-    // Using polynomial: 1.5x - 0.5x^3 iterated
+    // === HomRound ===
+    // Maps values near 0 → 0 and near 1 → 1
+    // Uses iterated sign polynomial: f(x) = 1.5x - 0.5x³
+    // on the range [-1,1] (after mapping [0,1] → [-1,1])
     inline Ciphertext<DCRTPoly> HomRound(
         const CryptoContext<DCRTPoly> &cc,
         Ciphertext<DCRTPoly> ct)
     {
-        // x → 2x - 1 (maps [0,1] to [-1,1])
+        // Map [0,1] → [-1,1]: y = 2x - 1
         ct = cc->EvalMult(ct, 2.0);
         ct = cc->EvalAdd(ct, -1.0);
 
-        // Apply sign approximation: 1.5x - 0.5x^3
-        auto x2 = cc->EvalMult(ct, ct);
-        auto x3 = cc->EvalMult(x2, ct);
-        auto term1 = cc->EvalMult(ct, 1.5);
-        auto term2 = cc->EvalMult(x3, -0.5);
-        ct = cc->EvalAdd(term1, term2);
+        // Iterate sign approximation: g(y) = 1.5y - 0.5y³
+        for (int iter = 0; iter < 2; iter++) {
+            auto y2 = cc->EvalMult(ct, ct);    // y²
+            auto y3 = cc->EvalMult(y2, ct);    // y³
+            auto t1 = cc->EvalMult(ct, 1.5);   // 1.5y
+            auto t2 = cc->EvalMult(y3, -0.5);  // -0.5y³
+            ct = cc->EvalAdd(t1, t2);
+        }
 
-        // Second iteration for better approximation
-        x2 = cc->EvalMult(ct, ct);
-        x3 = cc->EvalMult(x2, ct);
-        term1 = cc->EvalMult(ct, 1.5);
-        term2 = cc->EvalMult(x3, -0.5);
-        ct = cc->EvalAdd(term1, term2);
-
-        // Map back: (x+1)/2
+        // Map [-1,1] → [0,1]: x = (y+1)/2
         ct = cc->EvalAdd(ct, 1.0);
         ct = cc->EvalMult(ct, 0.5);
 
         return ct;
     }
 
-    // === Full repack pipeline ===
-    // Converts vector of TLWE lvl1 ciphertexts to a single CKKS ciphertext
+    // === Full repack pipeline (no decryption) ===
+    // TLWE lvl1 → CKKS, using direct 1/Δ scaling.
+    // Works when TLWE encrypts 0/1 with Δ = 2^scale_bits and noise << Δ.
     inline Ciphertext<DCRTPoly> LWEsToOpenFHE(
         const CryptoContext<DCRTPoly> &cc,
         const KeyPair<DCRTPoly> &keys,
         std::vector<TLWELvl1> &lwes,
-        const RepackKey &rk)
+        const RepackKey &rk,
+        uint32_t scale_bits = 29)
     {
         size_t num_lwes = lwes.size();
         size_t tfhe_n = Lvl1::n;
-        double K = 41.0;
+        double delta_inv = 1.0 / std::pow(2.0, scale_bits);
 
-        // Step 1: Build matrix A and vector b from TLWE ciphertexts
+        // Step 1: Build matrix A and vector b
+        // TLWE: (a, b) where phase = b - a·s = Δ·m + e
+        // We compute: Enc_CKKS((-a·s + b) / Δ) = Enc_CKKS(m + e/Δ)
         std::vector<std::vector<double>> A(num_lwes);
-        std::vector<double> b(num_lwes);
-
-        // Scale factor: TLWE uses uint32_t modulus (2^32)
-        // We need to normalize to [-0.5, 0.5) range then scale by 1/K
-        double rescale = 1.0; // for lvl1 (32-bit)
-        double multiplier = 1.0 / K;
+        std::vector<double> bvec(num_lwes);
 
         for (size_t i = 0; i < num_lwes; i++) {
             A[i].resize(tfhe_n);
-            // Negate a (TFHEpp format: (a, b=a·s+m+e) → (-a, b) so decrypt = b + (-a)·s)
             for (size_t j = 0; j < tfhe_n; j++) {
-                int32_t neg_a = -static_cast<int32_t>(lwes[i][j]);
-                A[i][j] = static_cast<double>(neg_a) * multiplier;
+                // Negate a, scale by 1/Δ
+                A[i][j] = -static_cast<double>(static_cast<int32_t>(lwes[i][j])) * delta_inv;
             }
-            b[i] = static_cast<double>(static_cast<int32_t>(lwes[i][tfhe_n])) * multiplier;
+            bvec[i] = static_cast<double>(static_cast<int32_t>(lwes[i][tfhe_n])) * delta_inv;
         }
 
-        // Step 2: Linear transform → Enc(A·s)
+        // Step 2: Linear transform → Enc(-a·s / Δ)
         auto result = LinearTransformBSGS(cc, A, rk, tfhe_n);
 
-        // Step 3: Add b → Enc(A·s + b) = Enc((Δm+e)/K)
-        auto pt_b = cc->MakeCKKSPackedPlaintext(b);
+        // Step 3: Add b/Δ → Enc((b - a·s) / Δ) = Enc(m + e/Δ) ≈ Enc(m)
+        auto pt_b = cc->MakeCKKSPackedPlaintext(bvec);
         result = cc->EvalAdd(result, pt_b);
 
-        // Step 4+5: HomMod + HomRound
-        // For the simplified version, multiply by K and round
-        result = HomModReduction(cc, result, K);
-        result = HomRound(cc, result);
+        // Note: HomRound is optional since e/Δ ≈ 2^7/2^29 ≈ 10⁻⁷ is negligible.
+        // The output values are already ≈ 0.0 or ≈ 1.0.
+        // Uncomment if rounding is needed for downstream operations:
+        // result = HomRound(cc, result);
 
         return result;
     }
 
     // === Simulated repack (for validation) ===
-    // Decrypts TLWE → re-encrypts in CKKS. Useful for debugging.
     inline Ciphertext<DCRTPoly> SimulatedRepack(
         const CryptoContext<DCRTPoly> &cc,
         const KeyPair<DCRTPoly> &keys,

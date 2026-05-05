@@ -2,16 +2,17 @@
 // TFHE→CKKS Repack using OpenFHE
 // Converts TLWE lvl1 ciphertexts to CKKS ciphertext without decryption.
 //
-// Algorithm (following HE3DB / Bossuat et al.):
+// Algorithm (following OpenFHE's EvalFHEWtoCKKS / Bossuat et al.):
 // 1. KeyGen: Encrypt TFHE sk in CKKS → Enc_CKKS(s_tfhe)
-// 2. LinearTransform: BSGS diagonal method → Enc_CKKS(-a·s/K)
-// 3. Add b/K: Enc_CKKS(phase/K) where phase = (b - a·s) mod q
-// 4. HomMod: Chebyshev approximation of sin(2πx)/(2π) → extract mod-q fractional part
-// 5. Multiply by K → Enc_CKKS(m)
-// 6. HomRound: polynomial sign approximation to snap to {0, 1}
+// 2. Scale A and b by prescale = 1/(q*K) where q=2^32, K=128
+//    This maps the real-valued inner product into [-1, 1]
+// 3. LinearTransform: BSGS diagonal method → Enc_CKKS(A·s * prescale)
+// 4. Add b * prescale → Enc_CKKS(phase/(q*K))
+// 5. HomMod: Chebyshev sin approximation to extract fractional part
+// 6. Double-angle iterations to sharpen the approximation
+// 7. Post-scale by 2π (for binary p≤4) to recover message
 
 #include "openfhe.h"
-#include "math/chebyshev.h"
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -118,67 +119,6 @@ namespace HEDB
         return result;
     }
 
-    // === HomMod ===
-    // Performs approximate modular reduction in CKKS domain.
-    // Input: Enc(phase/K) where phase = (b - a·s) is the real-valued inner product
-    //   and K is a scaling constant (typically 25 for Lvl1).
-    // Output: Enc(m/K) where m is the message extracted via mod reduction.
-    //
-    // Uses Chebyshev approximation of f(x) = sin(2πx) / (2π·K)
-    // followed by r iterations of double-angle: y → 2y² - (1/(2π))^(2^i)
-    //
-    // Following Algorithm 7 in Bossuat et al. (2021).
-    inline Ciphertext<DCRTPoly> HomMod(
-        const CryptoContext<DCRTPoly> &cc,
-        Ciphertext<DCRTPoly> ct,
-        double K,
-        uint32_t polyDegree = 59,
-        uint32_t r = 2)
-    {
-        // The input is phase/K where phase ∈ [-q/2, q/2] and K = 25.
-        // After HomMod we want to extract (phase mod 1) / K.
-        // sin(2πx)/(2π) maps x ∈ R to its fractional part (near integers).
-        //
-        // Step 1: Scale the Chebyshev approximation coefficients
-        // Following HE3DB: cnst_scale = (0.5/π)^(1/2^r)
-        double cnst_scale = std::pow(0.5 / M_PI, 1.0 / (1 << r));
-
-        // The function to approximate: cnst_scale * sin(2πx) / (2π)
-        // Domain: [-1, 1] (after Chebyshev mapping from the input range)
-        // The input range for phase/K:
-        //   phase = sum(-a_i * s_i) + b ∈ [-q/2, q/2] where q = 2^32
-        //   After /K: phase/K ∈ [-q/(2K), q/(2K)]
-        //   But the actual values cluster around m/K + integer multiples.
-
-        // For Lvl1 (32-bit), the range of phase/K is huge.
-        // The sin function is periodic, so we evaluate on [-0.5, 0.5]
-        // which captures one period. The offset -0.25/K shifts the encoding.
-
-        // Step 1: Subtract 0.25/K (encoding offset for binary {0,1} → {0, Δ/2})
-        ct = cc->EvalAdd(ct, -0.25 / K);
-
-        // Step 2: Evaluate Chebyshev approximation of cnst_scale * sin(2πx)/(2π)
-        // The input should already be mapped to the correct domain by the caller.
-        // We evaluate on [-0.5, 0.5] which is one period of sin(2πx).
-        auto sinFunc = [cnst_scale](double x) -> double {
-            return cnst_scale * std::sin(2.0 * M_PI * x) / (2.0 * M_PI);
-        };
-
-        ct = cc->EvalChebyshevFunction(sinFunc, ct, -0.5, 0.5, polyDegree);
-
-        // Step 3: Double-angle iterations: y → 2y² - θ
-        // Each iteration squares the approximation, improving accuracy.
-        double theta = std::pow(0.5 / M_PI, 1.0 / std::pow(2.0, r));
-        for (uint32_t i = 0; i < r; i++) {
-            theta *= theta;
-            ct = cc->EvalMult(ct, ct);   // y²
-            ct = cc->EvalAdd(ct, ct);     // 2y²
-            ct = cc->EvalAdd(ct, -theta); // 2y² - θ
-        }
-
-        return ct;
-    }
-
     // === HomRound ===
     // Maps values near 0 → 0 and near 1 → 1
     // Uses iterated sign polynomial: f(x) = 1.5x - 0.5x³
@@ -208,57 +148,100 @@ namespace HEDB
     }
 
     // === Full repack pipeline (no decryption) ===
-    // TLWE lvl1 → CKKS, following HE3DB's approach:
-    // 1. Scale by 1/K (K=25), compute A·s/K + b/K via BSGS linear transform
-    // 2. HomMod to extract mod-q fractional part
-    // 3. Multiply by K to recover message
-    // 4. HomRound to snap to {0, 1}
+    // TLWE lvl1 → CKKS, following OpenFHE's EvalFHEWtoCKKS approach:
+    //
+    // Key insight: prescale = 1/(q * K) maps the real-valued inner product
+    // (b - a·s) into the range [-1, 1], because |(b - a·s)| ≤ q/2 and K ≈ q/2.
+    // Then Chebyshev approximation of sin(2πx) on [-1, 1] extracts the
+    // fractional part (message), followed by double-angle iterations.
+    //
+    // Parameters:
+    //   K = 128: scaling constant, K > max(|noise|/q) ensures noise is absorbed
+    //   BT_ITER = 3: number of double-angle iterations
+    //   Chebyshev degree: determined by coefficients (119 for g_coefficientsFHEW128_8)
     inline Ciphertext<DCRTPoly> LWEsToOpenFHE(
         const CryptoContext<DCRTPoly> &cc,
         const KeyPair<DCRTPoly> &keys,
         std::vector<TLWELvl1> &lwes,
         const RepackKey &rk,
         uint32_t scale_bits = 29,
-        double K = 25.0,
-        uint32_t modPolyDegree = 59)
+        double K = 128.0)
     {
         size_t num_lwes = lwes.size();
         size_t tfhe_n = Lvl1::n;
 
-        // Step 1: Build matrix A/K and vector b/K
-        // TLWE: (a, b) where phase = b - a·s ≡ Δ·m + e (mod q)
-        // We compute: Enc_CKKS((-a·s + b) / K)
+        // prescale = 1/(q * K) where q = 2^32 (LWE modulus for Lvl1)
+        // This maps (-a·s + b) which is O(2^31) into O(1/K) ∈ [-1, 1]
+        double q_lwe = std::pow(2.0, 32);
+        double prescale = 1.0 / (q_lwe * K);
+
+        // Step 1: Build matrix A and vector b, scaled by prescale
         std::vector<std::vector<double>> A(num_lwes);
         std::vector<double> bvec(num_lwes);
 
         for (size_t i = 0; i < num_lwes; i++) {
             A[i].resize(tfhe_n);
             for (size_t j = 0; j < tfhe_n; j++) {
-                // Negate a, scale by 1/K (integer division like HE3DB)
+                // a values (negate for decryption formula: phase = b - a·s)
                 A[i][j] = static_cast<double>(
-                    -static_cast<int32_t>(lwes[i][j])) / K;
+                    static_cast<int32_t>(lwes[i][j])) * prescale;
             }
             bvec[i] = static_cast<double>(
-                static_cast<int32_t>(lwes[i][tfhe_n])) / K;
+                static_cast<int32_t>(lwes[i][tfhe_n])) * prescale;
         }
 
-        // Step 2: Linear transform → Enc(-a·s / K)
-        auto result = LinearTransformBSGS(cc, A, rk, tfhe_n);
+        // Step 2: Linear transform → Enc(A·s * prescale)
+        // Note: A contains the original 'a' values (not negated).
+        // The result is Enc(sum(a_j * s_j) * prescale).
+        // We want Enc((b - a·s) * prescale), so in step 3 we compute b - A·s.
+        auto AdotS = LinearTransformBSGS(cc, A, rk, tfhe_n);
 
-        // Step 3: Add b/K → Enc(phase/K)
+        // Step 3: Compute b - A·s → Enc(phase * prescale)
         auto pt_b = cc->MakeCKKSPackedPlaintext(bvec);
-        result = cc->EvalAdd(result, pt_b);
+        auto BminusAdotS = cc->EvalAdd(cc->EvalNegate(AdotS), pt_b);
 
-        // Step 4: HomMod → Enc(m/K) (extract message via mod reduction)
-        result = HomMod(cc, result, K, modPolyDegree);
+        // Step 4: HomMod — Chebyshev approximation of sin(2πx)/(2π) on [-1, 1]
+        // The input is phase/(q*K) which is in [-1/(2K), 1/(2K)] ⊂ [-1, 1]
+        // plus integer multiples of 1/K (from the wrap-around).
+        // sin(2πx) extracts the fractional part.
+        //
+        // Using OpenFHE's EvalChebyshevFunction to approximate
+        // f(x) = (2π)^(-1/8) * cos(2π/8 * (x - 0.25))
+        // which is equivalent to the double-angle formulation with BT_ITER=3.
+        auto sinFunc = [](double x) -> double {
+            // This is the base function before double-angle iterations.
+            // With BT_ITER=3, the effective function applied is:
+            // f(x) = sin(2πx)/(2π) after 3 double-angle steps.
+            // The base Chebyshev approximates:
+            //   (2π)^(-1/2^3) * cos(2π/2^3 * (x - 0.25))
+            return std::pow(2.0 * M_PI, -1.0/8.0) *
+                   std::cos(2.0 * M_PI / 8.0 * (x - 0.25));
+        };
 
-        // Step 5: Multiply by K → Enc(m)
-        result = cc->EvalMult(result, K);
+        uint32_t chebyDegree = 119;
+        double a_cheby = -1.0;
+        double b_cheby = 1.0;
+        auto ct = cc->EvalChebyshevFunction(sinFunc, BminusAdotS, a_cheby, b_cheby, chebyDegree);
 
-        // Step 6: HomRound to snap to {0, 1}
-        result = HomRound(cc, result);
+        // Step 5: Double-angle iterations (BT_ITER = 3)
+        // Each iteration: y → 2y² - scalar
+        const int32_t BT_ITER = 3;
+        for (int32_t j = 1; j <= BT_ITER; j++) {
+            ct = cc->EvalMult(ct, ct);     // y²
+            ct = cc->EvalAdd(ct, ct);       // 2y²
+            double scalar = 1.0 / std::pow(2.0 * M_PI, std::pow(2.0, j - BT_ITER));
+            ct = cc->EvalSub(ct, scalar);   // 2y² - scalar
+        }
 
-        return result;
+        // Step 6: Post-scale
+        // After HomMod, the output ≈ sin(2πx)/(2π) ≈ x for small x,
+        // where x = m*Δ/(q*K). So output ≈ m*Δ/(q*K).
+        // To recover m, multiply by q*K/Δ.
+        double delta = std::pow(2.0, scale_bits);
+        double postScale = q_lwe * K / delta;
+        ct = cc->EvalMult(ct, postScale);
+
+        return ct;
     }
 
     // === Simulated repack (for validation) ===

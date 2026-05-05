@@ -169,6 +169,7 @@ add_library(hedb STATIC
     src/HEDB/comparison/tfhepp_utils.cpp
     src/HEDB/comparison/extract_msb.cpp
     src/HEDB/comparison/operators.cpp
+    src/HEDB/comparison/ethmsb.cpp
 )
 target_include_directories(hedb PUBLIC
     ${PROJECT_SOURCE_DIR}/src

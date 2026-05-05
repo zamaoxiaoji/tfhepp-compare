@@ -272,12 +272,14 @@ void query_evaluation(size_t rows)
         rot_indices.push_back((int32_t)step);
     cc->EvalRotateKeyGen(keys.secretKey, rot_indices);
 
-    // =================== Repack: TFHE → CKKS ===================
-    cout << "Repacking 3 filter masks to CKKS..." << endl;
+    // =================== Repack: TFHE → CKKS (setup once, execute per-column) ===================
+    cout << "Setting up repack context..." << endl;
     auto t_repack_start = chrono::high_resolution_clock::now();
-    auto ct_seg_mask = LWEsToOpenFHE(cc, keys, seg_pred, sk, rows, rlwe_scale_bits);
-    auto ct_odate_mask = LWEsToOpenFHE(cc, keys, odate_pred, sk, rows, rlwe_scale_bits);
-    auto ct_sdate_mask = LWEsToOpenFHE(cc, keys, sdate_pred, sk, rows, rlwe_scale_bits);
+    auto rctx = RepackSetup(cc, keys, sk, rows, rlwe_scale_bits);
+    cout << "Repacking 3 filter masks to CKKS..." << endl;
+    auto ct_seg_mask = RepackExecute(rctx, seg_pred);
+    auto ct_odate_mask = RepackExecute(rctx, odate_pred);
+    auto ct_sdate_mask = RepackExecute(rctx, sdate_pred);
     auto t_repack_end = chrono::high_resolution_clock::now();
     double repack_ms = chrono::duration_cast<chrono::milliseconds>(t_repack_end - t_repack_start).count();
     cout << "  Repack time: " << repack_ms << " ms" << endl;

@@ -294,6 +294,34 @@ void GapMSBGateBootstrapping(TLWE<lvl1param> &res,
         res[lvl1param::k * lvl1param::n] += μ;
 }
 
+void GapMSBGateBootstrapping(TLWE<lvl1param> &res,
+                             const TLWE<lvl2param> &tlwe,
+                             const EvalKey &ek,
+                             bool result_type,
+                             uint32_t guard_k,
+                             uint32_t plain_bits)
+{
+    uint32_t μ = 1U << 29;
+    if (IS_ARITHMETIC(result_type)) μ = μ << 1;
+
+    constexpr uint32_t q = std::numeric_limits<lvl2param::T>::digits;
+    const uint64_t w_k = 1ULL << (plain_bits - 1 - guard_k);
+    const uint64_t delta = 1ULL << (q - plain_bits);
+    const uint64_t gap_offset = ((w_k + 1) * delta) / 2;
+
+    TLWE<lvl2param> tlweoffset = tlwe;
+    tlweoffset[lvl2param::k * lvl2param::n] +=
+        static_cast<lvl2param::T>(gap_offset);
+
+    TLWE<lvl0param> tlwelvl0;
+    IdentityKeySwitch<lvl20param>(tlwelvl0, tlweoffset, *ek.iksklvl20);
+    GateBootstrappingTLWE2TLWEFFT<lvl01param>(
+        res, tlwelvl0, *ek.bkfftlvl01, μ_polygen<lvl1param>(μ));
+
+    if (IS_ARITHMETIC(result_type))
+        res[lvl1param::k * lvl1param::n] += μ;
+}
+
 void GapMSBGateBootstrapping(TLWE<lvl2param> &res,
                              const TLWE<lvl2param> &tlwe,
                              const EvalKey &ek,

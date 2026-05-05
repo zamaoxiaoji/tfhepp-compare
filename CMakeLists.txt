@@ -178,9 +178,6 @@ target_include_directories(hedb PUBLIC
     ${PROJECT_SOURCE_DIR}/thirdparties/cereal/include
 )
 target_link_libraries(hedb PUBLIC tfhe++)
-# Pruned comparison test (always built, independent of ENABLE_TEST)
-add_executable(pruned_comparison_test test/pruned_comparison_test.cpp)
-target_link_libraries(pruned_comparison_test hedb tfhe++)
 
 # --- OpenFHE CKKS integration for TPC-H queries ---
 find_package(OpenFHE CONFIG QUIET)
@@ -196,22 +193,10 @@ if(OpenFHE_FOUND)
         add_link_options(-Wl,--no-as-needed)
     endif()
 
-    # TPC-H Q6
-    add_executable(tpch_q6 test/tpch_q6.cpp)
-    target_link_libraries(tpch_q6 hedb tfhe++ ${OpenFHE_SHARED_LIBRARIES})
-    target_compile_options(tpch_q6 PRIVATE -Wno-deprecated-declarations)
-
-    # TPC-H Q14
-    add_executable(tpch_q14 test/tpch_q14.cpp)
-    target_link_libraries(tpch_q14 hedb tfhe++ ${OpenFHE_SHARED_LIBRARIES})
-    target_compile_options(tpch_q14 PRIVATE -Wno-deprecated-declarations)
-
-    # Repack test
-    add_executable(repack_test test/repack_test.cpp)
-    target_link_libraries(repack_test hedb tfhe++ ${OpenFHE_SHARED_LIBRARIES})
-    target_compile_options(repack_test PRIVATE -Wno-deprecated-declarations)
+    set(HEDB_OPENFHE_LIBRARIES ${OpenFHE_SHARED_LIBRARIES})
 else()
     message(STATUS "OpenFHE not found, TPC-H query tests will not be built")
+    set(HEDB_OPENFHE_LIBRARIES "")
 endif()
 
 if(ENABLE_TEST)

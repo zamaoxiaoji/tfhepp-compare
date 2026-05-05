@@ -6,8 +6,12 @@
 // (BSGS linear transform + Chebyshev HomMod + double-angle).
 // The key step is converting TFHEpp format to OpenFHE format.
 //
-// For experimental evaluation, a SimulatedRepack (decrypt + re-encrypt)
-// is provided as a fallback when the full pipeline is not needed.
+// Usage:
+//   1) One-time setup:  RepackContext ctx = RepackSetup(cc, keys, sk, numSlots);
+//   2) Per-column call: auto ct = RepackExecute(ctx, lwes);
+//   This avoids re-running expensive Setup+KeyGen for each filter mask.
+//
+//   Or use the convenience wrapper LWEsToOpenFHE() for single-shot use.
 
 #include "openfhe.h"
 #include "binfhecontext.h"
@@ -113,14 +117,68 @@ namespace HEDB
         return result;
     }
 
-    // === Full repack pipeline using OpenFHE scheme switching ===
-    // Uses OpenFHE's EvalFHEWtoCKKS which handles:
-    // 1. BSGS linear transform (homomorphic partial decryption)
-    // 2. Chebyshev sin approximation (HomMod)
-    // 3. Double-angle iterations
-    // 4. Post-scaling
-    //
-    // Returns CKKS ciphertext with message values in the slots.
+    // =====================================================================
+    // Repack Context — holds pre-computed setup for repeated scheme switching
+    // =====================================================================
+    struct RepackContext {
+        CryptoContext<DCRTPoly> cc;
+        KeyPair<DCRTPoly> keys;
+        uint32_t numSlots;
+        uint32_t logQ_LWE;
+        uint64_t q_target;
+        size_t n;         // LWE dimension (Lvl1::n)
+        bool ready = false;
+    };
+
+    // === One-time setup: create BinFHE context, do scheme switching keygen ===
+    inline RepackContext RepackSetup(
+        CryptoContext<DCRTPoly> &cc,
+        const KeyPair<DCRTPoly> &keys,
+        const TFHESecretKey &tfhe_sk,
+        uint32_t numSlots,
+        uint32_t logQ_LWE = 28)
+    {
+        RepackContext ctx;
+        ctx.cc = cc;
+        ctx.keys = keys;
+        ctx.numSlots = numSlots;
+        ctx.logQ_LWE = logQ_LWE;
+        ctx.n = Lvl1::n;
+        ctx.q_target = 1ULL << logQ_LWE;
+
+        // Create OpenFHE FHEW context
+        auto ccLWE = std::make_shared<BinFHEContext>();
+        ccLWE->BinFHEContext::GenerateBinFHEContext(
+            TOY, false, logQ_LWE, 0, GINX, false);
+
+        // Convert TFHEpp secret key
+        auto lwesk = TFHEppToOpenFHEKey(tfhe_sk, ctx.n, NativeInteger(ctx.q_target));
+
+        // Setup scheme switching (expensive, only once!)
+        cc->EvalFHEWtoCKKSSetup(ccLWE, numSlots, logQ_LWE);
+        cc->SetBinCCForSchemeSwitch(ccLWE);
+        cc->EvalFHEWtoCKKSKeyGen(keys, lwesk);
+
+        ctx.ready = true;
+        return ctx;
+    }
+
+    // === Per-column repack: convert LWE vector to CKKS (uses pre-setup context) ===
+    inline Ciphertext<DCRTPoly> RepackExecute(
+        RepackContext &ctx,
+        std::vector<TLWELvl1> &lwes)
+    {
+        // Convert TFHEpp ciphertexts to OpenFHE format
+        auto lwes_openfhe = TFHEppToOpenFHECiphertexts(lwes, ctx.n, ctx.q_target);
+
+        // Perform scheme switching
+        auto result = ctx.cc->EvalFHEWtoCKKS(lwes_openfhe, ctx.numSlots, ctx.numSlots);
+        result = ctx.cc->EvalMult(result, std::sqrt(2.0));
+
+        return result;
+    }
+
+    // === Convenience wrapper: setup + execute in one call (for single-shot use) ===
     inline Ciphertext<DCRTPoly> LWEsToOpenFHE(
         CryptoContext<DCRTPoly> &cc,
         const KeyPair<DCRTPoly> &keys,
@@ -130,33 +188,8 @@ namespace HEDB
         uint32_t scale_bits = 29,
         uint32_t logQ_LWE = 28)
     {
-        size_t n = Lvl1::n;
-
-        // Step 1: Create OpenFHE FHEW context with matching parameters
-        auto ccLWE = std::make_shared<BinFHEContext>();
-        ccLWE->BinFHEContext::GenerateBinFHEContext(
-            TOY, false, logQ_LWE, 0, GINX, false);
-
-        // Step 2: Convert TFHEpp secret key to OpenFHE format
-        uint64_t q_target = 1ULL << logQ_LWE;
-        auto lwesk = TFHEppToOpenFHEKey(tfhe_sk, n, NativeInteger(q_target));
-
-        // Step 3: Setup scheme switching
-        cc->EvalFHEWtoCKKSSetup(ccLWE, numSlots, logQ_LWE);
-        cc->SetBinCCForSchemeSwitch(ccLWE);
-        cc->EvalFHEWtoCKKSKeyGen(keys, lwesk);
-
-        // Step 4: Convert TFHEpp ciphertexts to OpenFHE format
-        auto lwes_openfhe = TFHEppToOpenFHECiphertexts(lwes, n, q_target);
-
-        // Step 5: Perform the scheme switching
-        // With default p=4, m=1 maps to ~0.707 = sin(π/4) = 1/sqrt(2)
-        // This is because TFHEpp encodes at Δ=2^29 = q/8, while p=4 expects q/4.
-        // Apply correction factor sqrt(2) to map to {0, 1}.
-        auto result = cc->EvalFHEWtoCKKS(lwes_openfhe, numSlots, numSlots);
-        result = cc->EvalMult(result, std::sqrt(2.0));
-
-        return result;
+        auto ctx = RepackSetup(cc, keys, tfhe_sk, numSlots, logQ_LWE);
+        return RepackExecute(ctx, lwes);
     }
 
     // === Simulated repack (for validation) ===
@@ -192,3 +225,4 @@ namespace HEDB
     }
 
 } // namespace HEDB
+

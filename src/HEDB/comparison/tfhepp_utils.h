@@ -226,6 +226,14 @@ namespace TFHEpp
                                  uint32_t guard_k,
                                  uint32_t plain_bits);
 
+    // lvl2 -> lvl1
+    void GapMSBGateBootstrapping(TLWE<lvl1param> &res,
+                                 const TLWE<lvl2param> &tlwe,
+                                 const EvalKey &ek,
+                                 bool result_type,
+                                 uint32_t guard_k,
+                                 uint32_t plain_bits);
+
     // lvl2 → lvl2
     void GapMSBGateBootstrapping(TLWE<lvl2param> &res,
                                  const TLWE<lvl2param> &tlwe,

@@ -76,24 +76,15 @@ void PrunedBlindRotate(TRLWE<typename P::targetP> &res,
                        const Polynomial<typename P::targetP> &testvector,
                        uint32_t period_M = 0)
 {
-    constexpr uint32_t bitwidth = bits_needed<num_out - 1>();
-    const uint32_t b̄ = 2 * P::targetP::n -
-                       ((tlwe[P::domainP::k * P::domainP::n] >>
-                         (std::numeric_limits<typename P::domainP::T>::digits -
-                          1 - P::targetP::nbit + bitwidth))
-                            << bitwidth);
+    ModswitchTLWE<typename P::domainP> moded;
+    BRModSwitch<P, num_out>(moded, tlwe);
     res = {};
-    PolynomialMulByXai<typename P::targetP>(res[P::targetP::k], testvector, b̄);
+    PolynomialMulByXai<typename P::targetP>(
+        res[P::targetP::k], testvector,
+        moded[P::domainP::k * P::domainP::n]);
 
     for (int i = 0; i < P::domainP::k * P::domainP::n; i++) {
-        constexpr typename P::domainP::T roundoffset =
-            1ULL << (std::numeric_limits<typename P::domainP::T>::digits - 2 -
-                     P::targetP::nbit + bitwidth);
-        const uint32_t ā =
-            (tlwe[i] + roundoffset) >>
-            (std::numeric_limits<typename P::domainP::T>::digits - 1 -
-             P::targetP::nbit + bitwidth)
-                << bitwidth;
+        const uint32_t ā = moded[i];
 
         // Standard skip: ā == 0
         if (ā == 0) continue;

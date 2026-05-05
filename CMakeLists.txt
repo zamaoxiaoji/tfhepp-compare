@@ -164,6 +164,23 @@ if(USE_RANDEN)
 endif()
 add_subdirectory(src)
 
+# --- HEDB comparison library (periodic pruning + gap MSB) ---
+add_library(hedb STATIC
+    src/HEDB/comparison/tfhepp_utils.cpp
+    src/HEDB/comparison/extract_msb.cpp
+    src/HEDB/comparison/operators.cpp
+)
+target_include_directories(hedb PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/thirdparties/spqlios
+    ${PROJECT_SOURCE_DIR}/thirdparties/cereal/include
+)
+target_link_libraries(hedb PUBLIC tfhe++)
+# Pruned comparison test (always built, independent of ENABLE_TEST)
+add_executable(pruned_comparison_test test/pruned_comparison_test.cpp)
+target_link_libraries(pruned_comparison_test hedb tfhe++)
+
 if(ENABLE_TEST)
   add_subdirectory(test)
   add_subdirectory(thirdparties/AES)

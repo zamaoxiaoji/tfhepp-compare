@@ -495,14 +495,17 @@ HomGapMSBAtOriginalScale(
         throw std::invalid_argument("HomMSBOptions.kappa must be positive");
     if (encoding_p <= 0 || remaining_p <= 0)
         throw std::invalid_argument("HomMSB requires positive plaintext precision");
-    if (chapter_bit <= 0 || chapter_bit >= encoding_p)
-        throw std::invalid_argument("HomMSB chapter bit is outside the encoded message");
     if (remaining_p <= options.kappa) {
+        if (chapter_bit <= 0 || chapter_bit >= encoding_p)
+            return NaiveSignPBS_Lvl01<iksP, brP_base>(
+                ct, encoding_p, iksk, bkfft_base);
         const auto offset =
             HalfGapOffsetForChapterBit<typename domP::T>(encoding_p, chapter_bit);
         return NaiveSignPBS_Lvl01<iksP, brP_base>(
             ct, offset, iksk, bkfft_base);
     }
+    if (chapter_bit <= 0 || chapter_bit >= encoding_p)
+        throw std::invalid_argument("HomMSB chapter bit is outside the encoded message");
 
     auto weighted = ExtractWeightedChapterBitFast<brP_metapbs, iksP, brP_logari>(
         ct, encoding_p, chapter_bit, bkfft, trkeys, cfg, iksk, bkfft_logari,

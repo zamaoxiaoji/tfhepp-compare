@@ -237,4 +237,6 @@ if(ENABLE_TUTORIAL)
   add_subdirectory(tutorial)
 endif()
 
+add_subdirectory(paper_experiments)
+
 install(TARGETS tfhe++ LIBRARY DESTINATION lib)

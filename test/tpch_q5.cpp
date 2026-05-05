@@ -215,8 +215,7 @@ void query_evaluation(size_t rows)
     params.SetMultiplicativeDepth(30); // repack + multi-JOIN chain + GROUP BY
     params.SetScalingModSize(50);
     params.SetScalingTechnique(FIXEDAUTO);
-    params.SetSecurityLevel(HEStd_NotSet);
-    params.SetRingDim(32768);
+    params.SetSecurityLevel(HEStd_128_classic);
     size_t bs = 1; while (bs < rows) bs <<= 1;
     params.SetBatchSize(bs);
 

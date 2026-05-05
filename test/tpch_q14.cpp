@@ -146,8 +146,7 @@ void query_evaluation(size_t rows)
     params.SetMultiplicativeDepth(22); // 13 repack + 1 sqrt2 + 2 powers + 2 mask*rev + 4 spare
     params.SetScalingModSize(50);
     params.SetScalingTechnique(FIXEDAUTO);
-    params.SetSecurityLevel(HEStd_NotSet);
-    params.SetRingDim(8192);
+    params.SetSecurityLevel(HEStd_128_classic);
     size_t bs = 1; while (bs < rows) bs <<= 1;
     params.SetBatchSize(bs);
 

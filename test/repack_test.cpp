@@ -1,8 +1,7 @@
-// Standalone repack test: verify TLWE → CKKS conversion with HomMod
-// Following OpenFHE's EvalFHEWtoCKKS approach: prescale = 1/(q*K)
+// Standalone repack test: verify TLWE → CKKS conversion
+// Uses OpenFHE's native EvalFHEWtoCKKS scheme switching
 #include <iostream>
 #include <cmath>
-#include <random>
 #include <set>
 #include "../src/HEDB/comparison/HomCompare.h"
 #include "../src/HEDB/conversion/repack_openfhe.h"
@@ -11,7 +10,7 @@ using namespace HEDB;
 using namespace std;
 
 int main() {
-    cout << "=== Repack Test with HomMod ===" << endl;
+    cout << "=== Repack Test via OpenFHE Scheme Switching ===" << endl;
     cout << "Lvl1::n = " << Lvl1::n << endl;
 
     // TFHE keys
@@ -21,7 +20,6 @@ int main() {
     size_t num = 16;
     uint32_t scale_bits = 29;
     double scale = pow(2., scale_bits);
-    double K = 128.0;
 
     vector<uint32_t> expected(num);
     vector<TLWELvl1> lwes(num);
@@ -39,97 +37,80 @@ int main() {
         cout << "  [" << i << "] expected=" << expected[i] << " dec=" << dec << endl;
     }
 
-    // CKKS setup
-    // Depth budget following OpenFHE's EvalFHEWtoCKKS (SwitchFHEWtoCKKS example):
-    //   r=3 (BT_ITER=3) → Chebyshev max depth = 9, +1 for postscaling, +3 for BT_ITER
-    //   Total: 3 + 9 + 1 = 13 for FIXEDAUTO
-    //   Plus 2 for LinearTransform (ct×pt mult + folding rescale)
-    //   Plus 1 for postscale mult
-    //   Total: ~16-18
-    size_t bs = 1;
-    while (bs < (size_t)Lvl1::n) bs <<= 1;
-    cout << "CKKS batch_size = " << bs << endl;
+    // Verify modulus switch preserves message
+    cout << "\nModulus switch verification (q=2^32 → q'=2^28):" << endl;
+    {
+        uint64_t q_target = 1ULL << 28;
+        auto lwes_ofhe = TFHEppToOpenFHECiphertexts(lwes, Lvl1::n, q_target);
+        auto lwesk = TFHEppToOpenFHEKey(sk, Lvl1::n, NativeInteger(q_target));
+
+        for (size_t i = 0; i < min((size_t)4, num); i++) {
+            // Manual decryption: phase = b - a·s mod q'
+            auto& a_vec = lwes_ofhe[i]->GetA();
+            auto b_val = lwes_ofhe[i]->GetB();
+            auto& s_vec = lwesk->GetElement();
+
+            // Compute a·s mod q'
+            NativeInteger as_sum(0);
+            for (size_t j = 0; j < (size_t)Lvl1::n; j++) {
+                as_sum = as_sum.ModAdd(
+                    a_vec[j].ModMul(s_vec[j], NativeInteger(q_target)),
+                    NativeInteger(q_target));
+            }
+            auto phase = b_val.ModSub(as_sum, NativeInteger(q_target));
+            // Map phase to signed: if phase > q'/2, phase -= q'
+            int64_t phase_signed = phase.ConvertToInt();
+            if (phase_signed > (int64_t)(q_target / 2))
+                phase_signed -= q_target;
+
+            // With scale_bits=29, Δ=2^29. After modulus switch:
+            // Δ' = round(2^29 * 2^28 / 2^32) = round(2^25) = 2^25
+            double delta_new = std::pow(2.0, scale_bits) * q_target / std::pow(2.0, 32);
+            int32_t msg = (int32_t)std::round(phase_signed / delta_new);
+
+            cout << "  [" << i << "] expected=" << expected[i]
+                 << " phase=" << phase_signed
+                 << " Δ'=" << delta_new
+                 << " decoded=" << msg << endl;
+        }
+    }
+
+    // CKKS setup for scheme switching
+    // Following OpenFHE SwitchFHEWtoCKKS example:
+    // For r=3 in FHEWtoCKKS, Chebyshev max depth = 9, +1 for postscaling
+    // Total: 3 + 9 + 1 = 13
+    uint32_t multDepth = 3 + 9 + 1;
+    uint32_t scaleModSize = 50;
+    uint32_t ringDim = 8192;
+    uint32_t logQ_LWE = 28;
+    uint32_t slots = num;
+    uint32_t batchSize = slots;
 
     lbcrypto::CCParams<lbcrypto::CryptoContextCKKSRNS> params;
-    params.SetMultiplicativeDepth(20);
-    params.SetScalingModSize(50);
-    params.SetFirstModSize(60);
-    params.SetBatchSize(bs);
+    params.SetMultiplicativeDepth(multDepth);
+    params.SetScalingModSize(scaleModSize);
+    params.SetScalingTechnique(lbcrypto::FIXEDAUTO);
     params.SetSecurityLevel(lbcrypto::HEStd_NotSet);
-    params.SetRingDim(1 << 15); // 32768 for testing
+    params.SetRingDim(ringDim);
+    params.SetBatchSize(batchSize);
 
     auto cc = lbcrypto::GenCryptoContext(params);
     cc->Enable(lbcrypto::PKE);
     cc->Enable(lbcrypto::KEYSWITCH);
     cc->Enable(lbcrypto::LEVELEDSHE);
     cc->Enable(lbcrypto::ADVANCEDSHE);
+    cc->Enable(lbcrypto::SCHEMESWITCH);
 
     auto keys = cc->KeyGen();
-    cc->EvalMultKeyGen(keys.secretKey);
 
-    cout << "Ring dimension: " << cc->GetRingDimension() << endl;
+    cout << "\nCKKS ring dimension: " << cc->GetRingDimension() << endl;
+    cout << "Multiplicative depth: " << multDepth << endl;
+    cout << "Slots: " << slots << endl;
 
-    // Rotation keys
-    std::set<int32_t> rot_set;
-    for (size_t step = 1; step < bs; step <<= 1) {
-        rot_set.insert((int32_t)step);
-        rot_set.insert(-(int32_t)step);
-    }
-    size_t min_dim = std::min(num, (size_t)Lvl1::n);
-    size_t g_tilde = CeilSqrt(min_dim);
-    size_t b_tilde = CeilDiv(min_dim, g_tilde);
-    for (size_t i = 1; i < g_tilde; i++) rot_set.insert((int32_t)i);
-    for (size_t b = 1; b < b_tilde; b++) rot_set.insert((int32_t)(b * g_tilde));
-    for (size_t j = 0; (1UL << j) * num < (size_t)Lvl1::n; j++)
-        rot_set.insert((int32_t)((1U << j) * num));
-    vector<int32_t> rot_indices(rot_set.begin(), rot_set.end());
-    cout << "Rotation keys: " << rot_indices.size() << endl;
-    cc->EvalRotateKeyGen(keys.secretKey, rot_indices);
-
-    // Repack key
-    RepackKey rk;
-    RepackKeyGen(rk, cc, keys, sk, Lvl1::n);
-    cout << "Repack key generated, g=" << rk.rotated_sk.size() << endl;
-
-    // ============================
-    // First test: plaintext verification of prescale approach
-    // ============================
-    {
-        double q_lwe = pow(2.0, 32);
-        double prescale = 1.0 / (q_lwe * K);
-        cout << "\nprescale = 1/(2^32 * " << K << ") = " << prescale << endl;
-
-        cout << "Plaintext phase/(q*K) values:" << endl;
-        auto sk_raw = sk.key.get<Lvl1>();
-        for (size_t i = 0; i < min((size_t)4, num); i++) {
-            double phase_real = 0;
-            for (size_t j = 0; j < (size_t)Lvl1::n; j++) {
-                int32_t a_val = static_cast<int32_t>(lwes[i][j]);
-                int32_t s_val = (sk_raw[j] > 1) ? -1 : sk_raw[j];
-                phase_real += a_val * (double)s_val;  // a·s
-            }
-            double b_val = static_cast<int32_t>(lwes[i][Lvl1::n]);
-            double phase = b_val - phase_real;  // b - a·s (real, not mod q)
-            double phase_mod_q = fmod(phase, q_lwe);
-            if (phase_mod_q > q_lwe / 2) phase_mod_q -= q_lwe;
-            if (phase_mod_q < -q_lwe / 2) phase_mod_q += q_lwe;
-
-            cout << "  [" << i << "] expected=" << expected[i]
-                 << " phase_real=" << phase
-                 << " phase_mod_q=" << phase_mod_q
-                 << " phase/(q*K)=" << phase * prescale
-                 << " mod_phase/(q*K)=" << phase_mod_q * prescale
-                 << " sin(2pi*mod/qK)*2pi=" << sin(2*M_PI*phase_mod_q*prescale)*2*M_PI
-                 << endl;
-        }
-    }
-
-    // ============================
-    // True repack with HomMod
-    // ============================
-    cout << "\nRunning true repack with HomMod..." << endl;
+    // True repack via OpenFHE scheme switching
+    cout << "\nRunning true repack via EvalFHEWtoCKKS..." << endl;
     auto t_start = chrono::high_resolution_clock::now();
-    auto ct_result = LWEsToOpenFHE(cc, keys, lwes, rk, scale_bits, K);
+    auto ct_result = LWEsToOpenFHE(cc, keys, lwes, sk, slots, logQ_LWE);
     auto t_end = chrono::high_resolution_clock::now();
     double ms = chrono::duration_cast<chrono::milliseconds>(t_end - t_start).count();
     cout << "Repack time: " << ms << " ms" << endl;
@@ -142,14 +123,20 @@ int main() {
 
     cout << "\nResults:" << endl;
     double total_err = 0;
+    int correct = 0;
     for (size_t i = 0; i < num; i++) {
         double v = vals[i].real();
         double err = fabs(v - expected[i]);
         total_err += err;
+        bool ok = (err < 0.3);
+        if (ok) correct++;
         cout << "  [" << i << "] expected=" << expected[i]
-             << " got=" << v << " err=" << err << endl;
+             << " got=" << v << " err=" << err
+             << (ok ? " ✓" : " ✗") << endl;
     }
     cout << "Average error = " << total_err / num << endl;
+    cout << "Correct: " << correct << "/" << num << endl;
+
 
     return 0;
 }

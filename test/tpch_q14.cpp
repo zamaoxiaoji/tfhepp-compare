@@ -79,14 +79,10 @@ void query_evaluation(size_t rows)
     uniform_int_distribution<int> type_dist(0, num_types - 1);
     uniform_real_distribution<double> price_ddist(1.0, 100.0);
     uniform_real_distribution<double> disc_ddist(0.0, 0.1);
-
-    auto generate_date = [&]() -> uint64_t {
-        uniform_int_distribution<int> m(1, 12), d(1, 28);
-        return d(eng) + 100*m(eng) + 10000*1995;
-    };
+    uniform_int_distribution<uint32_t> date_dist(100, 200);
 
     for (size_t i = 0; i < rows; i++) {
-        ship_data[i] = generate_date();
+        ship_data[i] = date_dist(eng);
         ptype_data[i] = type_dist(eng);
         price_data[i] = price_ddist(eng);
         discount_data[i] = disc_ddist(eng);
@@ -94,31 +90,18 @@ void query_evaluation(size_t rows)
 
     // =================== TFHE Encryption ===================
     cout << "Encrypting with TFHE..." << endl;
-    vector<TLWELvl2> ship_ct(rows);
-    for (size_t i = 0; i < rows; i++) {
-        ship_ct[i] = TFHEpp::tlweSymInt32Encrypt<Lvl2>(
-            ship_data[i], Lvl2::α, pow(2., ship_scale), sk.key.get<Lvl2>());
-    }
+    // Use 8-bit Lvl1 encoding for dates (compatible with current ETHMSB)
+    uint32_t date_bits = 8;
+    uint32_t date_scale = numeric_limits<Lvl1::T>::digits - date_bits - 1;
+    uint32_t pred1 = 130, pred2 = 170; // date range filter
 
-    // Predicates: ship >= 19950901 AND ship < 19951001
-    Lvl2::T pred1 = 19501, pred2 = 11001; // Simplified: use MMDD encoding
-    // Actually for 16-bit encoding, use smaller date range
-    pred1 = 901;   // September 1
-    pred2 = 1001;  // October 1
-
-    // Re-encode dates to fit 16-bit: use MMDD format
+    vector<TLWELvl1> ship_ct(rows);
     for (size_t i = 0; i < rows; i++) {
-        ship_data[i] = ship_data[i] % 10000; // extract MMDD
+        ship_ct[i] = TFHEpp::tlweSymInt32Encrypt<Lvl1>(
+            ship_data[i], Lvl1::α, pow(2., date_scale), sk.key.get<Lvl1>());
     }
-    // Re-encrypt with MMDD encoding
-    uint32_t date_bits = 16;
-    uint32_t date_scale = numeric_limits<Lvl2::T>::digits - date_bits - 1;
-    for (size_t i = 0; i < rows; i++) {
-        ship_ct[i] = TFHEpp::tlweSymInt32Encrypt<Lvl2>(
-            ship_data[i], Lvl2::α, pow(2., date_scale), sk.key.get<Lvl2>());
-    }
-    auto ct_pred1 = TFHEpp::tlweSymInt32Encrypt<Lvl2>(pred1, Lvl2::α, pow(2., date_scale), sk.key.get<Lvl2>());
-    auto ct_pred2 = TFHEpp::tlweSymInt32Encrypt<Lvl2>(pred2, Lvl2::α, pow(2., date_scale), sk.key.get<Lvl2>());
+    auto ct_pred1 = TFHEpp::tlweSymInt32Encrypt<Lvl1>(pred1, Lvl1::α, pow(2., date_scale), sk.key.get<Lvl1>());
+    auto ct_pred2 = TFHEpp::tlweSymInt32Encrypt<Lvl1>(pred2, Lvl1::α, pow(2., date_scale), sk.key.get<Lvl1>());
 
     // Plaintext predicate evaluation
     vector<uint32_t> pred_plain(rows);
@@ -133,8 +116,8 @@ void query_evaluation(size_t rows)
 
     vector<TLWELvl1> cres1(rows), cres2(rows);
     for (size_t i = 0; i < rows; i++) {
-        ethmsb_greater_than_equal<Lvl2>(ship_ct[i], ct_pred1, cres1[i], date_bits, ek, LOGIC);
-        ethmsb_less_than<Lvl2>(ship_ct[i], ct_pred2, cres2[i], date_bits, ek, LOGIC);
+        ethmsb_greater_than_equal<Lvl1>(ship_ct[i], ct_pred1, cres1[i], date_bits, ek, LOGIC);
+        ethmsb_less_than<Lvl1>(ship_ct[i], ct_pred2, cres2[i], date_bits, ek, LOGIC);
         HomAND(pred_cres[i], cres1[i], cres2[i], ek, ARITHMETIC);
     }
 
@@ -160,30 +143,34 @@ void query_evaluation(size_t rows)
     // =================== CKKS Setup ===================
     cout << "Setting up OpenFHE CKKS..." << endl;
     CCParams<CryptoContextCKKSRNS> params;
-    params.SetMultiplicativeDepth(15);
+    params.SetMultiplicativeDepth(22); // 13 repack + 1 sqrt2 + 2 powers + 2 mask*rev + 4 spare
     params.SetScalingModSize(50);
-    params.SetBatchSize(rows);
-    params.SetSecurityLevel(HEStd_128_classic);
+    params.SetScalingTechnique(FIXEDAUTO);
+    params.SetSecurityLevel(HEStd_NotSet);
+    params.SetRingDim(8192);
+    size_t bs = 1; while (bs < rows) bs <<= 1;
+    params.SetBatchSize(bs);
 
     auto cc = GenCryptoContext(params);
     cc->Enable(PKE);
     cc->Enable(KEYSWITCH);
     cc->Enable(LEVELEDSHE);
+    cc->Enable(ADVANCEDSHE);
+    cc->Enable(SCHEMESWITCH);
 
     auto keys = cc->KeyGen();
     cc->EvalMultKeyGen(keys.secretKey);
 
+    // Rotation keys for RotateAndSum
     vector<int32_t> rot_indices;
-    for (size_t step = 1; step < rows; step <<= 1) {
+    for (size_t step = 1; step < bs; step <<= 1)
         rot_indices.push_back((int32_t)step);
-        rot_indices.push_back(-(int32_t)step);
-    }
     cc->EvalRotateKeyGen(keys.secretKey, rot_indices);
 
-    // =================== Repack: TFHE → CKKS ===================
-    cout << "Repacking TFHE→CKKS..." << endl;
+    // =================== Repack: TFHE → CKKS (true homomorphic) ===================
+    cout << "Repacking TFHE→CKKS (EvalFHEWtoCKKS)..." << endl;
     auto t_repack_start = chrono::high_resolution_clock::now();
-    auto ct_mask = SimulatedRepack(cc, keys, pred_cres, sk, rlwe_scale_bits);
+    auto ct_mask = LWEsToOpenFHE(cc, keys, pred_cres, sk, rows, rlwe_scale_bits);
     auto t_repack_end = chrono::high_resolution_clock::now();
     double repack_ms = chrono::duration_cast<chrono::milliseconds>(t_repack_end - t_repack_start).count();
 

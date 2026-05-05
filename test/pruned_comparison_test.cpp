@@ -14,7 +14,7 @@ std::vector<std::pair<uint64_t, uint64_t>> make_cases(uint32_t plain_bits,
 {
     const uint64_t max_msg = (1ULL << (plain_bits - 1)) - 1;
     const uint64_t half = max_msg / 2;
-    const uint64_t margin = 16;
+    const uint64_t margin = std::min<uint64_t>(16, std::max<uint64_t>(2, max_msg / 4));
     std::vector<std::pair<uint64_t, uint64_t>> cases = {
         {margin, 0}, {0, margin}, {max_msg, max_msg - margin},
         {max_msg - margin, max_msg}, {max_msg, 0}, {0, max_msg},

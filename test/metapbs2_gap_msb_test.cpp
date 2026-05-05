@@ -33,7 +33,11 @@ struct br_lvl22param {
 };
 
 using brP = br_lvl22param;
+using brP_logari = TFHEpp::lvl02param;
+using brP_base = TFHEpp::lvl01param;
+using iksP_t = TFHEpp::lvl20param;
 using P = TFHEpp::lvl2param;
+using P_out = TFHEpp::lvl1param;
 
 static double elapsed_ms(std::chrono::steady_clock::time_point start,
                          std::chrono::steady_clock::time_point stop) {
@@ -106,6 +110,16 @@ static void test_parameter_helpers() {
     if (HalfGapOffsetForChapterBit<uint64_t>(p, 7) !=
         uint64_t(17) * (TorusScaleForPrecision<uint64_t>(p) >> 1)) {
         printf("  FAIL: k=7 offset should be 17*Delta/2\n");
+        exit(1);
+    }
+    const int gap_lsb_k = LSBIndexFromChapterBit(p, 7);
+    const auto gap_weight = ArithmeticWeightForChapterBit<uint64_t>(p, 7);
+    if (WeightedBitNegacyclicCompatible<uint64_t>(gap_lsb_k, P::n, gap_weight)) {
+        printf("  FAIL: normal GapMSB weight must not pass direct negacyclic guard\n");
+        exit(1);
+    }
+    if (!WeightedBitNegacyclicCompatible<uint64_t>(0, P::n, BinaryScaleT<uint64_t>)) {
+        printf("  FAIL: 0/Q/2 logical bit LUT should satisfy negacyclic guard\n");
         exit(1);
     }
     expect_invalid_argument("GapMSB top bit k=0", [] {
@@ -348,9 +362,17 @@ static void robustness_multikey_recursive_gapmsb(
         TFHEpp::SecretKey sk;
         auto bkfft = std::make_unique<TFHEpp::BootstrappingKeyFFT<brP>>();
         TFHEpp::bkfftgen<brP>(*bkfft, sk);
+        auto bkfft_logari = std::make_unique<TFHEpp::BootstrappingKeyFFT<brP_logari>>();
+        TFHEpp::bkfftgen<brP_logari>(*bkfft_logari, sk);
+        auto bkfft_base = std::make_unique<TFHEpp::BootstrappingKeyFFT<brP_base>>();
+        TFHEpp::bkfftgen<brP_base>(*bkfft_base, sk);
+        auto iksk = std::make_unique<TFHEpp::KeySwitchingKey<iksP_t>>();
+        TFHEpp::ikskgen<iksP_t>(*iksk, sk);
         auto trkey1 = GenerateTruncRepeatKey<P>(sk.key.get<P>(), cfg.rounds[0].beta);
         auto trkey2 = GenerateTruncRepeatKey<P>(sk.key.get<P>(), cfg.rounds[1].beta);
         std::vector<TruncRepeatKey<P>> trkeys = {std::move(trkey1), std::move(trkey2)};
+        HomMSBOptions options;
+        options.kappa = 5;
 
         int pass = 0;
         int fail = 0;
@@ -358,12 +380,12 @@ static void robustness_multikey_recursive_gapmsb(
             TFHEpp::TLWE<P> ct{};
             TFHEpp::tlweSymEncrypt<P>(
                 ct, encode_message<P>(m, p), P::α, sk.key.get<P>());
-            auto out = RecursiveGapMSB<brP>(
-                ct, *bkfft, trkeys, cfg,
-                GapMSBOptions{.p = p, .k = chapter_k},
-                /*rounds=*/2);
-            auto phase = TFHEpp::tlweSymPhase<P>(out, sk.key.get<P>());
-            const int got = DecodeSignPhase<P>(phase);
+            (void)chapter_k;
+            auto out = HomMSB<brP, brP_logari, brP_base, iksP_t>(
+                ct, p, *bkfft, trkeys, cfg,
+                *bkfft_logari, *bkfft_base, *iksk, options);
+            auto phase = TFHEpp::tlweSymPhase<P_out>(out, sk.key.get<P_out>());
+            const int got = DecodeSignPhase<P_out>(phase);
             const int want = m >= cfg.t / 2 ? 1 : 0;
             if (got == want) {
                 pass++;

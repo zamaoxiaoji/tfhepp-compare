@@ -151,7 +151,7 @@ void BlindRotateGLWE(
 
     // Use TFHEpp's exact ModSwitch to accumulate rounding errors correctly
     TFHEpp::ModswitchTLWE<domP> moded;
-    TFHEpp::BRModSwitch<brP, tgtP::nbit>(moded, ctLWE);
+    TFHEpp::BRModSwitch<brP, 1>(moded, ctLWE);
 
     uint32_t b_bar = moded[n];
 
@@ -165,6 +165,58 @@ void BlindRotateGLWE(
         if (a_bar == 0) continue;
         TFHEpp::CMUXwithPolynomialMulByXaiMinusOne<brP>(ctOut, bkfft[i], a_bar);
     }
+}
+
+// =============================================================
+// BlindRotateTLWEWithPeriod: standard first-round BR on the original TLWE.
+//
+// This matches tfhe-go's runExplicitWithTV first round: C0 = BlindRotate(ct, TV).
+// Optional period pruning is only sound for the caller-provided periodic LUT
+// and only skips rotations whose mod-switched exponent is a multiple of the
+// LUT period.
+// =============================================================
+template <class brP>
+void BlindRotateTLWEWithPeriod(
+    TFHEpp::TRLWE<typename brP::targetP>& ctOut,
+    const TFHEpp::TLWE<typename brP::domainP>& ct,
+    const TFHEpp::Polynomial<typename brP::targetP>& tv,
+    const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
+    int period = 0,
+    BlindRotatePruneStats* stats = nullptr) {
+    using tgtP = typename brP::targetP;
+    using domP = typename brP::domainP;
+    constexpr int n = domP::k * domP::n;
+    const int twoN = 2 * tgtP::n;
+
+    if (period > 1 && twoN % period != 0)
+        throw std::invalid_argument("BlindRotateTLWEWithPeriod: period must divide 2N");
+
+#ifdef USE_KEY_BUNDLE
+    if (stats) {
+        TFHEpp::ModswitchTLWE<domP> moded;
+        TFHEpp::BRModSwitch<brP, 1>(moded, ct);
+        for (int i = 0; i < n; i++)
+            if (moded[i] != 0) stats->total++;
+    }
+    TFHEpp::BlindRotate<brP>(ctOut, ct, bkfft, tv);
+#else
+    TFHEpp::ModswitchTLWE<domP> moded;
+    TFHEpp::BRModSwitch<brP, 1>(moded, ct);
+
+    ctOut = {};
+    TFHEpp::PolynomialMulByXai<tgtP>(ctOut[tgtP::k], tv, moded[n]);
+
+    for (int i = 0; i < n; i++) {
+        uint32_t abar = moded[i];
+        if (abar == 0) continue;
+        if (stats) stats->total++;
+        if (period > 1 && static_cast<int>(abar % static_cast<uint32_t>(period)) == 0) {
+            if (stats) stats->skipped++;
+            continue;
+        }
+        TFHEpp::CMUXwithPolynomialMulByXaiMinusOne<brP>(ctOut, bkfft[i], abar);
+    }
+#endif
 }
 
 // =============================================================
@@ -230,6 +282,91 @@ TFHEpp::TRLWE<P> MakeAccumulator(const TFHEpp::Polynomial<P>& tv) {
     return acc;
 }
 
+template <class brP>
+void FirstRoundRemainderFromBRModSwitch(
+    TFHEpp::TLWE<typename brP::domainP>& crem,
+    const TFHEpp::TLWE<typename brP::domainP>& ct) {
+    using domP = typename brP::domainP;
+    using tgtP = typename brP::targetP;
+    constexpr int n = domP::k * domP::n;
+    constexpr int twoN = 2 * tgtP::n;
+    constexpr int shift =
+        std::numeric_limits<typename domP::T>::digits - 1 - tgtP::nbit;
+    const auto scale = static_cast<typename domP::T>(typename domP::T(1) << shift);
+
+    TFHEpp::ModswitchTLWE<domP> moded;
+    TFHEpp::BRModSwitch<brP, 1>(moded, ct);
+
+    for (int i = 0; i < n; i++)
+        crem[i] = ct[i] - static_cast<typename domP::T>(moded[i]) * scale;
+
+    const uint32_t exponent = moded[n] % static_cast<uint32_t>(twoN);
+    const uint32_t q_body =
+        (static_cast<uint32_t>(twoN) - exponent) % static_cast<uint32_t>(twoN);
+    crem[n] = ct[n] - static_cast<typename domP::T>(q_body) * scale;
+}
+
+template <class brP>
+TFHEpp::TLWE<typename brP::targetP>
+RunAlgorithm1WithTV(
+    const TFHEpp::TLWE<typename brP::domainP>& ct,
+    const TFHEpp::Polynomial<typename brP::targetP>& tv,
+    const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
+    const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
+    const Algorithm1Config& cfg,
+    int first_blind_rotate_period = 0,
+    BlindRotatePruneStats* prune_stats = nullptr) {
+    using tgtP = typename brP::targetP;
+    using domP = typename brP::domainP;
+    constexpr int N = tgtP::n;
+
+    if (cfg.K < 0 || static_cast<int>(cfg.rounds.size()) != cfg.K)
+        throw std::invalid_argument("RunAlgorithm1WithTV requires cfg.rounds.size() == cfg.K");
+    if (static_cast<int>(trkeys.size()) < cfg.K)
+        throw std::invalid_argument("RunAlgorithm1WithTV requires one TruncRepeat key per round");
+    if (cfg.t <= 0 || (2 * N) % cfg.t != 0)
+        throw std::invalid_argument("RunAlgorithm1WithTV requires cfg.t dividing 2N");
+
+    std::vector<int> redundancies(cfg.K + 1);
+    std::vector<int> deltas(cfg.K);
+    redundancies[0] = 2 * N / cfg.t;
+    for (int k = 0; k < cfg.K; k++) {
+        deltas[k] = DeltaOffset(redundancies[k], cfg.rounds[k].beta);
+        redundancies[k + 1] = redundancies[k] * cfg.rounds[k].beta;
+    }
+
+    TFHEpp::TRLWE<tgtP> prev_GLWE;
+    BlindRotateTLWEWithPeriod<brP>(
+        prev_GLWE, ct, tv, bkfft, first_blind_rotate_period, prune_stats);
+
+    TFHEpp::TLWE<domP> prev_crem;
+    FirstRoundRemainderFromBRModSwitch<brP>(prev_crem, ct);
+
+    int current_mod = 2 * N;
+    for (int k = 0; k < cfg.K; k++) {
+        const auto& rnd = cfg.rounds[k];
+
+        TFHEpp::TRLWE<tgtP> Ck_prime;
+        HomTruncRepeatShifted<tgtP>(Ck_prime, prev_GLWE,
+                                     -rnd.T, rnd.T, rnd.beta, deltas[k],
+                                     trkeys[k]);
+
+        TFHEpp::TLWE<domP> cquo_k, crem_k;
+        HomDivRemAtScale<domP>(cquo_k, crem_k, prev_crem, current_mod, rnd.beta);
+
+        TFHEpp::TRLWE<tgtP> Ck;
+        BlindRotateGLWEFromQuotient<brP>(Ck, cquo_k, Ck_prime, bkfft, N);
+
+        current_mod *= rnd.beta;
+        prev_GLWE = Ck;
+        prev_crem = crem_k;
+    }
+
+    TFHEpp::TLWE<tgtP> cout;
+    SampleExtractIndex0<tgtP>(cout, prev_GLWE);
+    return cout;
+}
+
 // =============================================================
 // RunAlgorithm1: complete Meta-PBS Algorithm 1 pipeline
 //
@@ -257,68 +394,9 @@ RunAlgorithm1(
     int first_blind_rotate_period = 0,
     BlindRotatePruneStats* prune_stats = nullptr) {
     using tgtP = typename brP::targetP;
-    using domP = typename brP::domainP;
-    constexpr int N = tgtP::n;
-
-    // Compute round parameters: a_k, b_k, delta_k
-    // r_0 = 2N / t,  r_k = r_{k-1} * beta_k
-    // [r]_sym = [lo, hi],  a_k = lo(r_{k-1}),  b_k = hi(r_{k-1})
-    // delta_k = DeltaOffset(r_{k-1}, beta_k)
-    std::vector<int> redundancies(cfg.K + 1);
-    std::vector<int> deltas(cfg.K);
-    redundancies[0] = 2 * N / cfg.t;
-    for (int k = 0; k < cfg.K; k++) {
-        deltas[k] = DeltaOffset(redundancies[k], cfg.rounds[k].beta);
-        redundancies[k + 1] = redundancies[k] * cfg.rounds[k].beta;
-    }
-
-    // ---- Step 0: build test vector ----
     auto tv = BuildMetaPBSTV<tgtP>(f, cfg.t);
-
-    // ---- Step 1': initial HomDivRem on ct ----
-    TFHEpp::TLWE<domP> cquo0, crem0;
-    HomDivRemLWE<domP>(cquo0, crem0, ct, static_cast<typename domP::T>(2 * N));
-
-    // ---- Step 1: initial BlindRotate from the paper quotient ----
-    TFHEpp::TRLWE<tgtP> C0;
-    BlindRotateGLWEFromQuotient<brP>(
-        C0, cquo0, MakeAccumulator<tgtP>(tv), bkfft, N,
-        first_blind_rotate_period, prune_stats);
-
-    // ---- Expansion rounds ----
-    int current_mod = 2 * N;
-    TFHEpp::TRLWE<tgtP> prev_GLWE = C0;
-    TFHEpp::TLWE<domP> prev_crem = crem0;
-
-    for (int k = 0; k < cfg.K; k++) {
-        const auto& rnd = cfg.rounds[k];
-        int a_k = -rnd.T;
-        int b_k = rnd.T;
-        int delta_k = deltas[k];
-
-        // Step 2k: TruncRepeat + delta shift
-        TFHEpp::TRLWE<tgtP> Ck_prime;
-        HomTruncRepeatShifted<tgtP>(Ck_prime, prev_GLWE,
-                                     a_k, b_k, rnd.beta, delta_k,
-                                     trkeys[k]);
-
-        // Step 2k': HomDivRem on remainder
-        TFHEpp::TLWE<domP> cquo_k, crem_k;
-        HomDivRemAtScale<domP>(cquo_k, crem_k, prev_crem, current_mod, rnd.beta);
-
-        // Step 3k: BlindRotate from quotient
-        TFHEpp::TRLWE<tgtP> Ck;
-        BlindRotateGLWEFromQuotient<brP>(Ck, cquo_k, Ck_prime, bkfft, N);
-
-        current_mod *= rnd.beta;
-        prev_GLWE = Ck;
-        prev_crem = crem_k;
-    }
-
-    // ---- Extract output: SampleExtract coefficient 0 ----
-    TFHEpp::TLWE<tgtP> cout;
-    SampleExtractIndex0<tgtP>(cout, prev_GLWE);
-    return cout;
+    return RunAlgorithm1WithTV<brP>(
+        ct, tv, bkfft, trkeys, cfg, first_blind_rotate_period, prune_stats);
 }
 
 }  // namespace MetaPBS2

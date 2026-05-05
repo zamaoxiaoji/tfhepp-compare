@@ -209,63 +209,9 @@ ExtractKthBit(
     int first_blind_rotate_period = 0,
     BlindRotatePruneStats* prune_stats = nullptr) {
     using tgtP = typename brP::targetP;
-
-    // Build the k-th bit test vector
     auto tv = BuildKthBitTestVector<tgtP>(k, t);
-
-    // Run Algorithm 1 with this TV
-    // We use the internal pipeline directly with the custom TV:
-    using domP = typename brP::domainP;
-    constexpr int N = tgtP::n;
-
-    // Compute round parameters
-    std::vector<int> redundancies(cfg.K + 1);
-    std::vector<int> deltas(cfg.K);
-    redundancies[0] = 2 * N / cfg.t;
-    for (int rnd = 0; rnd < cfg.K; rnd++) {
-        deltas[rnd] = DeltaOffset(redundancies[rnd], cfg.rounds[rnd].beta);
-        redundancies[rnd + 1] = redundancies[rnd] * cfg.rounds[rnd].beta;
-    }
-
-    // Initial HomDivRem
-    TFHEpp::TLWE<domP> cquo0, crem0;
-    HomDivRemLWE<domP>(cquo0, crem0, ct, static_cast<typename domP::T>(2 * N));
-
-    // Initial BlindRotate with k-th bit TV from quotient coordinates.
-    TFHEpp::TRLWE<tgtP> C0;
-    BlindRotateGLWEFromQuotient<brP>(
-        C0, cquo0, MakeAccumulator<tgtP>(tv), bkfft, N,
-        first_blind_rotate_period, prune_stats);
-
-    int current_mod = 2 * N;
-    TFHEpp::TRLWE<tgtP> prev_GLWE = C0;
-    TFHEpp::TLWE<domP> prev_crem = crem0;
-
-    for (int rnd = 0; rnd < cfg.K; rnd++) {
-        const auto& round = cfg.rounds[rnd];
-        int a_k = -round.T;
-        int b_k = round.T;
-        int delta_k = deltas[rnd];
-
-        TFHEpp::TRLWE<tgtP> Ck_prime;
-        HomTruncRepeatShifted<tgtP>(Ck_prime, prev_GLWE,
-                                     a_k, b_k, round.beta, delta_k,
-                                     trkeys[rnd]);
-
-        TFHEpp::TLWE<domP> cquo_k, crem_k;
-        HomDivRemAtScale<domP>(cquo_k, crem_k, prev_crem, current_mod, round.beta);
-
-        TFHEpp::TRLWE<tgtP> Ck;
-        BlindRotateGLWEFromQuotient<brP>(Ck, cquo_k, Ck_prime, bkfft, N);
-
-        current_mod *= round.beta;
-        prev_GLWE = Ck;
-        prev_crem = crem_k;
-    }
-
-    TFHEpp::TLWE<tgtP> cout;
-    SampleExtractIndex0<tgtP>(cout, prev_GLWE);
-    return cout;
+    return RunAlgorithm1WithTV<brP>(
+        ct, tv, bkfft, trkeys, cfg, first_blind_rotate_period, prune_stats);
 }
 
 // =============================================================
@@ -343,6 +289,116 @@ BitExtract(
         ct, bkfft, trkeys, cfg,
         BitExtractOptions{.p = p, .k = k},
         prune_stats);
+}
+
+template <typename T>
+inline bool IsTorusSelfNegating(T x) {
+    static_assert(std::is_unsigned_v<T>, "IsTorusSelfNegating expects unsigned torus");
+    return x == T(0) || x == BinaryScaleT<T>;
+}
+
+inline bool KthBitInvariantUnderHalfTurn(int k, int N) {
+    if (k < 0) return false;
+    if (k + 1 >= static_cast<int>(std::numeric_limits<unsigned int>::digits))
+        return false;
+    return (N % (1u << (k + 1))) == 0;
+}
+
+template <typename T>
+inline bool WeightedBitNegacyclicCompatible(int k, int N, T weight_torus) {
+    return KthBitInvariantUnderHalfTurn(k, N) && IsTorusSelfNegating(weight_torus);
+}
+
+// =============================================================
+// BuildWeightedBitTestVector: guarded direct arithmetic-weight LUT.
+//
+// This path is only valid when the resulting TV satisfies the negacyclic
+// constraint required by blind rotation. For the usual GapMSB clear-bit
+// weights, that condition is false unless weight_torus is self-negating
+// (0 or Q/2), so callers should be prepared to fall back to 0/Q/2 extraction
+// followed by LOG_to_ARI.
+// =============================================================
+template <class targetP>
+TFHEpp::Polynomial<targetP> BuildWeightedBitTestVector(
+    int k, int t, typename targetP::T weight_torus) {
+    constexpr int N = targetP::n;
+    if (t != 2 * N)
+        throw std::invalid_argument("BuildWeightedBitTestVector currently requires t=2N");
+    if (k < 0 || k > MaxExtractableBit(N))
+        throw std::invalid_argument("k out of range for given t");
+    if (!WeightedBitNegacyclicCompatible(k, N, weight_torus))
+        throw std::invalid_argument("direct weighted bit LUT violates negacyclic encoding");
+
+    TFHEpp::Polynomial<targetP> tv = {};
+    for (int j = 0; j < N; j++)
+        if (((j >> k) & 1) == 1)
+            tv[j] = weight_torus;
+    return tv;
+}
+
+// =============================================================
+// ExtractKthBitWeighted: extract bit k with direct arithmetic weight output.
+//
+// Same Meta-PBS pipeline as ExtractKthBit, but the LUT outputs
+// 0/weight_torus instead of 0/BinaryScale.
+//
+// Output: TLWE encrypting 0 or weight_torus (arithmetic encoding).
+// This can be directly subtracted from the original ciphertext
+// to clear the bit, without a separate LOG_to_ARI bootstrap.
+// =============================================================
+template <class brP>
+TFHEpp::TLWE<typename brP::targetP>
+ExtractKthBitWeighted(
+    const TFHEpp::TLWE<typename brP::domainP>& ct,
+    int k, int t,
+    typename brP::targetP::T weight_torus,
+    const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
+    const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
+    const Algorithm1Config& cfg,
+    int first_blind_rotate_period = 0,
+    BlindRotatePruneStats* prune_stats = nullptr) {
+    using tgtP = typename brP::targetP;
+    auto tv = BuildWeightedBitTestVector<tgtP>(k, t, weight_torus);
+    return RunAlgorithm1WithTV<brP>(
+        ct, tv, bkfft, trkeys, cfg, first_blind_rotate_period, prune_stats);
+}
+
+// =============================================================
+// BitExtractWeighted: Chapter-3 wrapper for weighted bit extraction.
+//
+// Same as BitExtract but outputs 0/weight_torus directly.
+// Eliminates the need for LogicalBitToArithmeticWeight PBS.
+// =============================================================
+template <class brP>
+TFHEpp::TLWE<typename brP::targetP>
+BitExtractWeighted(
+    const TFHEpp::TLWE<typename brP::domainP>& ct,
+    const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
+    const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
+    const Algorithm1Config& cfg,
+    const BitExtractOptions& options,
+    typename brP::targetP::T weight_torus,
+    BlindRotatePruneStats* prune_stats = nullptr) {
+    using tgtP = typename brP::targetP;
+    constexpr int N = tgtP::n;
+
+    if (cfg.t != CheckedPowerOfTwo(options.p))
+        throw std::invalid_argument("BitExtractWeighted requires cfg.t == 2^p");
+    if (cfg.t != 2 * N)
+        throw std::invalid_argument("BitExtractWeighted currently supports only cfg.t=2N");
+
+    int lsb_k = LSBIndexFromChapterBit(options.p, options.k);
+    if (lsb_k > MaxExtractableBit(N))
+        throw std::invalid_argument("BitExtractWeighted requested bit is not supported by negacyclic encoding");
+
+    int first_period = 0;
+    if (options.enable_periodic_pruning)
+        first_period = options.period > 0
+                           ? options.period
+                           : BitExtractPeriodFromChapterBit(options.p, options.k);
+
+    return ExtractKthBitWeighted<brP>(
+        ct, lsb_k, cfg.t, weight_torus, bkfft, trkeys, cfg, first_period, prune_stats);
 }
 
 }  // namespace MetaPBS2

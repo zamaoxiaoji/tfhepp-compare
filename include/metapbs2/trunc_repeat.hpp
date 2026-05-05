@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "mulfft.hpp"
@@ -206,7 +207,13 @@ TruncPadKey<P> GenerateTruncPadKey(const TFHEpp::Key<P>& key) {
 // Keys[i] = HalfTRGSWFFT(s[i] * sumPoly)  for i = 0..N-1
 // =============================================================
 template <class P>
-using TruncRepeatKey = std::unordered_map<uint32_t, TFHEpp::HalfTRGSWFFT<P>>;
+struct TruncRepeatKeyEntry {
+    uint32_t index;
+    TFHEpp::HalfTRGSWFFT<P> key;
+};
+
+template <class P>
+using TruncRepeatKey = std::vector<TruncRepeatKeyEntry<P>>;
 
 // ---------------------------------------------------------------
 // GenerateTruncRepeatKey: encrypts HalfTRGSWFFT(s[i] * sumPoly).
@@ -216,6 +223,7 @@ using TruncRepeatKey = std::unordered_map<uint32_t, TFHEpp::HalfTRGSWFFT<P>>;
 template <class P>
 TruncRepeatKey<P> GenerateTruncRepeatKey(const TFHEpp::Key<P>& key, int B) {
     TruncRepeatKey<P> trkey;
+    trkey.reserve(P::k * P::n);
     auto sumPoly = BuildSumPoly<P>(B);
 
     for (uint32_t i = 0; i < P::k * P::n; i++) {
@@ -229,7 +237,11 @@ TruncRepeatKey<P> GenerateTruncRepeatKey(const TFHEpp::Key<P>& key, int B) {
 
         TFHEpp::HalfTRGSW<P> halftrgsw;
         TFHEpp::halftrgswSymEncrypt<P>(halftrgsw, si_sum, P::α, key);
-        trkey[i] = TFHEpp::ApplyFFT2halftrgsw<P>(halftrgsw);
+        TruncRepeatKeyEntry<P> entry{
+            .index = i,
+            .key = TFHEpp::ApplyFFT2halftrgsw<P>(halftrgsw),
+        };
+        trkey.push_back(std::move(entry));
     }
     return trkey;
 }
@@ -310,35 +322,33 @@ void HomTruncRepeat(TFHEpp::TRLWE<P>& result,
     // Body term: truncRepeat(B_body, [a,b], B)
     result[P::k] = PlainTruncRepeatByLemma5<P>(input[P::k], a, b, B);
 
-    // Mask columns
-    for (uint32_t ki = 0; ki < P::k; ki++) {
-        for (int i = 0; i < N; i++) {
-            uint32_t key_idx = i + ki * N;
-            auto it = repkey.find(key_idx);
-            if (it == repkey.end()) continue;  // s[i]=0, skip
+    // Mask columns: the key stores only nonzero secret positions.
+    for (const auto& entry : repkey) {
+        const uint32_t key_idx = entry.index;
+        const uint32_t ki = key_idx / N;
+        const int i = static_cast<int>(key_idx % N);
 
-            // Rotate A[ki] by X^i  (monomial rotation)
-            auto rotA = PolyMulByXk<P>(input[ki], i);
+        // Rotate A[ki] by X^i  (monomial rotation)
+        auto rotA = PolyMulByXk<P>(input[ki], i);
 
-            // truncPad (NOT truncRepeat) on rotated polynomial
-            auto tp = PlainTruncPadByLemma5<P>(rotA, a, b, B);
+        // truncPad (NOT truncRepeat) on rotated polynomial
+        auto tp = PlainTruncPadByLemma5<P>(rotA, a, b, B);
 
-            // Zero-skip optimization
-            bool all_zero = true;
-            for (int j = 0; j < N; j++) {
-                if (tp[j] != 0) { all_zero = false; break; }
-            }
-            if (all_zero) continue;
-
-            // External product: <G⁻¹(tp), RLev(s[i]·sumPoly)>
-            TFHEpp::TRLWE<P> contribution;
-            TFHEpp::ExternalProduct<P>(contribution, tp, it->second);
-
-            // Accumulate (subtract)
-            for (int comp = 0; comp <= (int)P::k; comp++)
-                for (int j = 0; j < N; j++)
-                    result[comp][j] -= contribution[comp][j];
+        // Zero-skip optimization
+        bool all_zero = true;
+        for (int j = 0; j < N; j++) {
+            if (tp[j] != 0) { all_zero = false; break; }
         }
+        if (all_zero) continue;
+
+        // External product: <G⁻¹(tp), RLev(s[i]·sumPoly)>
+        TFHEpp::TRLWE<P> contribution;
+        TFHEpp::ExternalProduct<P>(contribution, tp, entry.key);
+
+        // Accumulate (subtract)
+        for (int comp = 0; comp <= (int)P::k; comp++)
+            for (int j = 0; j < N; j++)
+                result[comp][j] -= contribution[comp][j];
     }
 }
 

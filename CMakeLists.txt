@@ -182,6 +182,33 @@ target_link_libraries(hedb PUBLIC tfhe++)
 add_executable(pruned_comparison_test test/pruned_comparison_test.cpp)
 target_link_libraries(pruned_comparison_test hedb tfhe++)
 
+# --- OpenFHE CKKS integration for TPC-H queries ---
+find_package(OpenFHE CONFIG QUIET)
+if(OpenFHE_FOUND)
+    message(STATUS "OpenFHE found: ${BASE_OPENFHE_VERSION}")
+    include_directories(${OpenFHE_INCLUDE})
+    include_directories(${OpenFHE_INCLUDE}/third-party/include)
+    include_directories(${OpenFHE_INCLUDE}/core)
+    include_directories(${OpenFHE_INCLUDE}/pke)
+    include_directories(${OpenFHE_INCLUDE}/binfhe)
+    link_directories(${OpenFHE_LIBDIR})
+    if(UNIX AND NOT APPLE)
+        add_link_options(-Wl,--no-as-needed)
+    endif()
+
+    # TPC-H Q6
+    add_executable(tpch_q6 test/tpch_q6.cpp)
+    target_link_libraries(tpch_q6 hedb tfhe++ ${OpenFHE_SHARED_LIBRARIES})
+    target_compile_options(tpch_q6 PRIVATE -Wno-deprecated-declarations)
+
+    # TPC-H Q14
+    add_executable(tpch_q14 test/tpch_q14.cpp)
+    target_link_libraries(tpch_q14 hedb tfhe++ ${OpenFHE_SHARED_LIBRARIES})
+    target_compile_options(tpch_q14 PRIVATE -Wno-deprecated-declarations)
+else()
+    message(STATUS "OpenFHE not found, TPC-H query tests will not be built")
+endif()
+
 if(ENABLE_TEST)
   add_subdirectory(test)
   add_subdirectory(thirdparties/AES)

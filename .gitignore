@@ -1,3 +1,15 @@
 build
 .vscode
 .claudebuild_pruned/
+.cache
+build_pruned
+thirdparties/cereal
+thirdparties/AES
+.claude/settings.json
+唐黎-北京邮电大学研究生学位论文(2).pdf
+Chapter_3_revised (1).tex
+.gitignore
+thirdparties/cereal
+samplepaper.tex
+Chapter_4.tex
+Chapter_5.tex

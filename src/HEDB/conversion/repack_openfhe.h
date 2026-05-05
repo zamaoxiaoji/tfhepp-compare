@@ -2,13 +2,16 @@
 // TFHE→CKKS Repack using OpenFHE
 // Converts TLWE lvl1 ciphertexts to CKKS ciphertext without decryption.
 //
-// Algorithm overview:
+// Algorithm (following HE3DB / Bossuat et al.):
 // 1. KeyGen: Encrypt TFHE sk in CKKS → Enc_CKKS(s_tfhe)
-// 2. LinearTransform: BSGS diagonal method → Enc_CKKS(A·s)
-// 3. Add b: Enc_CKKS(A·s + b) = Enc_CKKS((Δm + e)/Δ) ≈ Enc_CKKS(m)
-// 4. HomRound: polynomial sign approximation to snap to {0, 1}
+// 2. LinearTransform: BSGS diagonal method → Enc_CKKS(-a·s/K)
+// 3. Add b/K: Enc_CKKS(phase/K) where phase = (b - a·s) mod q
+// 4. HomMod: Chebyshev approximation of sin(2πx)/(2π) → extract mod-q fractional part
+// 5. Multiply by K → Enc_CKKS(m)
+// 6. HomRound: polynomial sign approximation to snap to {0, 1}
 
 #include "openfhe.h"
+#include "math/chebyshev.h"
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -115,6 +118,67 @@ namespace HEDB
         return result;
     }
 
+    // === HomMod ===
+    // Performs approximate modular reduction in CKKS domain.
+    // Input: Enc(phase/K) where phase = (b - a·s) is the real-valued inner product
+    //   and K is a scaling constant (typically 25 for Lvl1).
+    // Output: Enc(m/K) where m is the message extracted via mod reduction.
+    //
+    // Uses Chebyshev approximation of f(x) = sin(2πx) / (2π·K)
+    // followed by r iterations of double-angle: y → 2y² - (1/(2π))^(2^i)
+    //
+    // Following Algorithm 7 in Bossuat et al. (2021).
+    inline Ciphertext<DCRTPoly> HomMod(
+        const CryptoContext<DCRTPoly> &cc,
+        Ciphertext<DCRTPoly> ct,
+        double K,
+        uint32_t polyDegree = 59,
+        uint32_t r = 2)
+    {
+        // The input is phase/K where phase ∈ [-q/2, q/2] and K = 25.
+        // After HomMod we want to extract (phase mod 1) / K.
+        // sin(2πx)/(2π) maps x ∈ R to its fractional part (near integers).
+        //
+        // Step 1: Scale the Chebyshev approximation coefficients
+        // Following HE3DB: cnst_scale = (0.5/π)^(1/2^r)
+        double cnst_scale = std::pow(0.5 / M_PI, 1.0 / (1 << r));
+
+        // The function to approximate: cnst_scale * sin(2πx) / (2π)
+        // Domain: [-1, 1] (after Chebyshev mapping from the input range)
+        // The input range for phase/K:
+        //   phase = sum(-a_i * s_i) + b ∈ [-q/2, q/2] where q = 2^32
+        //   After /K: phase/K ∈ [-q/(2K), q/(2K)]
+        //   But the actual values cluster around m/K + integer multiples.
+
+        // For Lvl1 (32-bit), the range of phase/K is huge.
+        // The sin function is periodic, so we evaluate on [-0.5, 0.5]
+        // which captures one period. The offset -0.25/K shifts the encoding.
+
+        // Step 1: Subtract 0.25/K (encoding offset for binary {0,1} → {0, Δ/2})
+        ct = cc->EvalAdd(ct, -0.25 / K);
+
+        // Step 2: Evaluate Chebyshev approximation of cnst_scale * sin(2πx)/(2π)
+        // The input should already be mapped to the correct domain by the caller.
+        // We evaluate on [-0.5, 0.5] which is one period of sin(2πx).
+        auto sinFunc = [cnst_scale](double x) -> double {
+            return cnst_scale * std::sin(2.0 * M_PI * x) / (2.0 * M_PI);
+        };
+
+        ct = cc->EvalChebyshevFunction(sinFunc, ct, -0.5, 0.5, polyDegree);
+
+        // Step 3: Double-angle iterations: y → 2y² - θ
+        // Each iteration squares the approximation, improving accuracy.
+        double theta = std::pow(0.5 / M_PI, 1.0 / std::pow(2.0, r));
+        for (uint32_t i = 0; i < r; i++) {
+            theta *= theta;
+            ct = cc->EvalMult(ct, ct);   // y²
+            ct = cc->EvalAdd(ct, ct);     // 2y²
+            ct = cc->EvalAdd(ct, -theta); // 2y² - θ
+        }
+
+        return ct;
+    }
+
     // === HomRound ===
     // Maps values near 0 → 0 and near 1 → 1
     // Uses iterated sign polynomial: f(x) = 1.5x - 0.5x³
@@ -144,45 +208,55 @@ namespace HEDB
     }
 
     // === Full repack pipeline (no decryption) ===
-    // TLWE lvl1 → CKKS, using direct 1/Δ scaling.
-    // Works when TLWE encrypts 0/1 with Δ = 2^scale_bits and noise << Δ.
+    // TLWE lvl1 → CKKS, following HE3DB's approach:
+    // 1. Scale by 1/K (K=25), compute A·s/K + b/K via BSGS linear transform
+    // 2. HomMod to extract mod-q fractional part
+    // 3. Multiply by K to recover message
+    // 4. HomRound to snap to {0, 1}
     inline Ciphertext<DCRTPoly> LWEsToOpenFHE(
         const CryptoContext<DCRTPoly> &cc,
         const KeyPair<DCRTPoly> &keys,
         std::vector<TLWELvl1> &lwes,
         const RepackKey &rk,
-        uint32_t scale_bits = 29)
+        uint32_t scale_bits = 29,
+        double K = 25.0,
+        uint32_t modPolyDegree = 59)
     {
         size_t num_lwes = lwes.size();
         size_t tfhe_n = Lvl1::n;
-        double delta_inv = 1.0 / std::pow(2.0, scale_bits);
 
-        // Step 1: Build matrix A and vector b
-        // TLWE: (a, b) where phase = b - a·s = Δ·m + e
-        // We compute: Enc_CKKS((-a·s + b) / Δ) = Enc_CKKS(m + e/Δ)
+        // Step 1: Build matrix A/K and vector b/K
+        // TLWE: (a, b) where phase = b - a·s ≡ Δ·m + e (mod q)
+        // We compute: Enc_CKKS((-a·s + b) / K)
         std::vector<std::vector<double>> A(num_lwes);
         std::vector<double> bvec(num_lwes);
 
         for (size_t i = 0; i < num_lwes; i++) {
             A[i].resize(tfhe_n);
             for (size_t j = 0; j < tfhe_n; j++) {
-                // Negate a, scale by 1/Δ
-                A[i][j] = -static_cast<double>(static_cast<int32_t>(lwes[i][j])) * delta_inv;
+                // Negate a, scale by 1/K (integer division like HE3DB)
+                A[i][j] = static_cast<double>(
+                    -static_cast<int32_t>(lwes[i][j])) / K;
             }
-            bvec[i] = static_cast<double>(static_cast<int32_t>(lwes[i][tfhe_n])) * delta_inv;
+            bvec[i] = static_cast<double>(
+                static_cast<int32_t>(lwes[i][tfhe_n])) / K;
         }
 
-        // Step 2: Linear transform → Enc(-a·s / Δ)
+        // Step 2: Linear transform → Enc(-a·s / K)
         auto result = LinearTransformBSGS(cc, A, rk, tfhe_n);
 
-        // Step 3: Add b/Δ → Enc((b - a·s) / Δ) = Enc(m + e/Δ) ≈ Enc(m)
+        // Step 3: Add b/K → Enc(phase/K)
         auto pt_b = cc->MakeCKKSPackedPlaintext(bvec);
         result = cc->EvalAdd(result, pt_b);
 
-        // Note: HomRound is optional since e/Δ ≈ 2^7/2^29 ≈ 10⁻⁷ is negligible.
-        // The output values are already ≈ 0.0 or ≈ 1.0.
-        // Uncomment if rounding is needed for downstream operations:
-        // result = HomRound(cc, result);
+        // Step 4: HomMod → Enc(m/K) (extract message via mod reduction)
+        result = HomMod(cc, result, K, modPolyDegree);
+
+        // Step 5: Multiply by K → Enc(m)
+        result = cc->EvalMult(result, K);
+
+        // Step 6: HomRound to snap to {0, 1}
+        result = HomRound(cc, result);
 
         return result;
     }

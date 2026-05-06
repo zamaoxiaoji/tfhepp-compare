@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <fstream>
+#include <iosfwd>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -43,6 +45,15 @@ MetaPBS2::GapMSBOptions ToGapMSBOptions(const Chapter3Params& params);
 std::string Chapter3ParameterSummary(const Chapter3Params& params);
 std::vector<std::string> Chapter3AlgorithmTrace();
 std::string SecuritySummary();
+std::ostream* OpenOptionalOutputFile(
+    int& index,
+    int argc,
+    char** argv,
+    std::unique_ptr<std::ofstream>& file);
+void WriteOutputLine(
+    std::ostream& primary,
+    std::ostream* secondary,
+    const std::string& line);
 
 template <class brP>
 TFHEpp::TLWE<typename brP::targetP> Chapter3BitExtract(

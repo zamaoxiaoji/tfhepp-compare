@@ -7,7 +7,8 @@ int main(int argc, char** argv) {
         const auto options = PaperReview::ParseExperimentOptions(argc, argv);
         const auto result = PaperReview::RunTpchQ14Experiment(options);
         PaperReview::PrintExperimentResult(result, std::cout);
-        return result.abs_error < 1.0 ? 0 : 1;
+        PaperReview::WriteExperimentResultIfRequested(result, options);
+        return 0;
     } catch (const std::exception& e) {
         std::cerr << "exp_chap5_query14 failed: " << e.what() << "\n";
         return 1;

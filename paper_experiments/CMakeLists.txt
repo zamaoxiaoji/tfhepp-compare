@@ -1,5 +1,13 @@
 find_package(OpenFHE CONFIG REQUIRED)
 
+add_library(paper_native_baselines native_baseline_experiments.cpp)
+target_include_directories(paper_native_baselines PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(paper_native_baselines PUBLIC tfhe++)
+target_compile_features(paper_native_baselines PUBLIC cxx_std_20)
+
 add_library(paper_algorithms algorithms.cpp tpch_experiments.cpp chap3_compare_experiment.cpp)
 target_include_directories(paper_algorithms PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -22,7 +30,7 @@ endif()
 
 macro(add_paper_experiment name source)
     add_executable(${name} ${source})
-    target_link_libraries(${name} PRIVATE paper_algorithms)
+    target_link_libraries(${name} PRIVATE paper_algorithms paper_native_baselines)
 endmacro()
 
 add_paper_experiment(exp_chap3_rel_comp exp_chap3_rel_comp.cpp)

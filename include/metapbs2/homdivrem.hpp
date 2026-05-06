@@ -41,7 +41,6 @@ template <class domP>
 void HomDivRemLWE(TFHEpp::TLWE<domP>& c_quo, TFHEpp::TLWE<domP>& c_rem,
                   const TFHEpp::TLWE<domP>& c, typename domP::T q_prime) {
     using T = typename domP::T;
-    constexpr uint32_t bits = std::numeric_limits<T>::digits;
     constexpr uint32_t len = domP::k * domP::n + 1;
 
     // scale = Q / q' = 2^bits / q_prime

@@ -60,14 +60,27 @@ inline T TorusScaleForPrecision(int p) {
 }
 
 template <typename T>
-inline T HalfGapOffsetForChapterBit(int p, int k) {
-    static_assert(std::is_unsigned_v<T>, "HalfGapOffsetForChapterBit expects unsigned torus");
+inline T StandardMSBOffsetForPrecision(int p) {
+    static_assert(std::is_unsigned_v<T>, "StandardMSBOffsetForPrecision expects unsigned torus");
+    return TorusScaleForPrecision<T>(p) >> 1;
+}
+
+template <typename T>
+inline T GapExtraOffsetForChapterBit(int p, int k) {
+    static_assert(std::is_unsigned_v<T>, "GapExtraOffsetForChapterBit expects unsigned torus");
     if (k <= 0)
         throw std::invalid_argument("GapMSB cannot clear the Chapter/MSB top bit");
     const int lsb_k = LSBIndexFromChapterBit(p, k);
     const T delta = TorusScaleForPrecision<T>(p);
     const T w = T(1) << lsb_k;
-    return (w + T(1)) * (delta >> 1);
+    return w * (delta >> 1);
+}
+
+template <typename T>
+inline T HalfGapOffsetForChapterBit(int p, int k) {
+    static_assert(std::is_unsigned_v<T>, "HalfGapOffsetForChapterBit expects unsigned torus");
+    return StandardMSBOffsetForPrecision<T>(p) +
+           GapExtraOffsetForChapterBit<T>(p, k);
 }
 
 template <typename T>
@@ -454,8 +467,11 @@ HomGapMSB(
         throw std::invalid_argument("HomMSBOptions.kappa must be positive");
     if (p <= 0)
         throw std::invalid_argument("HomMSB requires positive plaintext precision");
-    if (p <= options.kappa)
-        return NaiveSignPBS_Lvl01<iksP, brP_base>(ct, p, iksk, bkfft_base);
+    if (p <= options.kappa) {
+        const auto offset = StandardMSBOffsetForPrecision<typename domP::T>(p);
+        return NaiveSignPBS_Lvl01<iksP, brP_base>(
+            ct, offset, iksk, bkfft_base);
+    }
 
     HomMSBOptions round_options = options;
     const int chapter_bit = options.kappa;
@@ -465,6 +481,8 @@ HomGapMSB(
 
     TFHEpp::TLWE<tgtP> ct_gap{};
     ClearChapterBitAssign<brP_metapbs>(ct_gap, ct, weighted);
+    ct_gap[domP::k * domP::n] +=
+        GapExtraOffsetForChapterBit<typename domP::T>(p, chapter_bit);
 
     return HomGapMSB<brP_metapbs, brP_logari, brP_base, iksP>(
         ct_gap, p - (options.kappa - 1), bkfft, trkeys, cfg,
@@ -496,11 +514,7 @@ HomGapMSBAtOriginalScale(
     if (encoding_p <= 0 || remaining_p <= 0)
         throw std::invalid_argument("HomMSB requires positive plaintext precision");
     if (remaining_p <= options.kappa) {
-        if (chapter_bit <= 0 || chapter_bit >= encoding_p)
-            return NaiveSignPBS_Lvl01<iksP, brP_base>(
-                ct, encoding_p, iksk, bkfft_base);
-        const auto offset =
-            HalfGapOffsetForChapterBit<typename domP::T>(encoding_p, chapter_bit);
+        const auto offset = StandardMSBOffsetForPrecision<typename domP::T>(encoding_p);
         return NaiveSignPBS_Lvl01<iksP, brP_base>(
             ct, offset, iksk, bkfft_base);
     }
@@ -513,6 +527,8 @@ HomGapMSBAtOriginalScale(
 
     TFHEpp::TLWE<tgtP> ct_gap{};
     ClearChapterBitAssign<brP_metapbs>(ct_gap, ct, weighted);
+    ct_gap[domP::k * domP::n] +=
+        GapExtraOffsetForChapterBit<typename domP::T>(encoding_p, chapter_bit);
 
     return HomGapMSBAtOriginalScale<brP_metapbs, brP_logari, brP_base, iksP>(
         ct_gap, encoding_p, remaining_p - (options.kappa - 1),

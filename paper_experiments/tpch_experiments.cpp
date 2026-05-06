@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -59,14 +60,14 @@ std::uint64_t MaxComparableValue(int comparison_bits) {
     if (comparison_bits <= 1 ||
         comparison_bits >= std::numeric_limits<std::uint64_t>::digits)
         throw std::invalid_argument("comparison bit width is outside the supported range");
-    return (std::uint64_t{1} << (comparison_bits - 1)) - 1;
+    return (std::uint64_t{1} << comparison_bits) - 1;
 }
 
 void RequireComparable(std::uint64_t value, int comparison_bits,
                        const std::string& name) {
     if (value > MaxComparableValue(comparison_bits))
         throw std::invalid_argument(
-            name + " exceeds the configured signed-safe comparison range");
+            name + " exceeds the configured [0, 2^bits-1] comparison range");
 }
 
 int DecodeComparisonBit(const TFHEpp::TLWE<P_out>& ct,
@@ -89,11 +90,22 @@ double TimeMs(Fn&& fn) {
     return std::chrono::duration<double, std::milli>(stop - start).count();
 }
 
-std::vector<double> AsDouble(const std::vector<int>& values, std::size_t slots) {
-    std::vector<double> out(slots, 0.0);
-    for (std::size_t i = 0; i < values.size(); i++)
-        out[i] = static_cast<double>(values[i]);
-    return out;
+void AddTiming(
+    std::vector<StageTiming>& timings,
+    const std::string& category,
+    const std::string& name,
+    double milliseconds) {
+    timings.push_back({category, name, milliseconds});
+}
+
+double SumTimings(
+    const std::vector<StageTiming>& timings,
+    const std::string& category) {
+    double total = 0.0;
+    for (const auto& t : timings) {
+        if (t.category == category) total += t.milliseconds;
+    }
+    return total;
 }
 
 std::vector<double> AsDouble(const std::vector<std::uint32_t>& values, std::size_t slots) {
@@ -206,46 +218,6 @@ public:
         hom_options_.kappa = options.compare_kappa;
     }
 
-    CkksCiphertext PlainMask(const std::vector<int>& mask, const std::string& name) {
-        if (mask.size() > runtime_.slots)
-            throw std::invalid_argument("mask exceeds slot count");
-
-        if (options_.mask_mode == MaskInputMode::CkksEncryptedPlain) {
-            CkksCiphertext ct;
-            const double ms = TimeMs([&] {
-                ct = EncryptVector(
-                    runtime_.cc, runtime_.keys.publicKey,
-                    AsDouble(mask, runtime_.slots), runtime_.slots);
-            });
-            timings_.push_back({"encrypt_mask_ckks_" + name, ms});
-            return ct;
-        }
-
-        if (options_.mask_mode == MaskInputMode::TfheGapMSBRepack)
-            throw std::logic_error("PlainMask called in tfhe-gapmsb mode");
-
-        EnsureRepackContext();
-        std::vector<TFHEpp::TLWE<TFHEpp::lvl1param>> lwes(runtime_.slots);
-        const double encrypt_ms = TimeMs([&] {
-            const double scale = std::pow(2.0, kScaleBits);
-            for (std::size_t i = 0; i < runtime_.slots; i++) {
-                const auto torus = static_cast<typename TFHEpp::lvl1param::T>(
-                    (i < mask.size() ? mask[i] : 0) * scale);
-                TFHEpp::tlweSymEncrypt<TFHEpp::lvl1param>(
-                    lwes[i], torus, TFHEpp::lvl1param::α,
-                    sk_.key.get<TFHEpp::lvl1param>());
-            }
-        });
-        timings_.push_back({"encrypt_mask_tfhe_" + name, encrypt_ms});
-
-        CkksCiphertext ct;
-        const double repack_ms = TimeMs([&] {
-            ct = RepackExecute<TFHEpp::lvl1param>(*repack_context_, lwes);
-        });
-        timings_.push_back({"repack_mask_" + name, repack_ms});
-        return ct;
-    }
-
     CkksCiphertext CompareConstant(
         const std::vector<std::uint32_t>& values,
         std::uint32_t constant,
@@ -258,13 +230,6 @@ public:
         RequireComparable(constant, comparison_bits, name + " constant");
         for (const auto value : values)
             RequireComparable(value, comparison_bits, name + " value");
-
-        if (options_.mask_mode != MaskInputMode::TfheGapMSBRepack) {
-            std::vector<int> mask(values.size(), 0);
-            for (std::size_t i = 0; i < values.size(); i++)
-                mask[i] = ExpectedPredicate(values[i], constant, predicate);
-            return PlainMask(mask, name);
-        }
 
         EnsureTfheKeys();
         EnsureRepackContext();
@@ -297,7 +262,7 @@ public:
                     P_out::α, sk_.key.get<P_out>());
             }
         });
-        timings_.push_back({"where_gapmsb_compare_" + name, compare_ms});
+        AddTiming(timings_, "filter", "where_gapmsb_compare_" + name, compare_ms);
         if (error_count) *error_count += local_errors;
 
         const double mask_ms = TimeMs([&] {
@@ -309,13 +274,13 @@ public:
                     P_out::α, sk_.key.get<P_out>());
             }
         });
-        timings_.push_back({"where_sign_to_tfhe_mask_" + name, mask_ms});
+        AddTiming(timings_, "aggregation", "where_sign_to_tfhe_mask_" + name, mask_ms);
 
         CkksCiphertext binary_mask;
         const double repack_ms = TimeMs([&] {
             binary_mask = RepackExecute<P_out>(*repack_context_, arithmetic_masks);
         });
-        timings_.push_back({"where_repack_mask_" + name, repack_ms});
+        AddTiming(timings_, "aggregation", "where_repack_mask_" + name, repack_ms);
         return binary_mask;
     }
 
@@ -357,7 +322,7 @@ private:
             trkeys_.push_back(MetaPBS2::GenerateTruncRepeatKey<P_in>(
                 sk_.key.get<P_in>(), cfg_.rounds[1].beta));
         });
-        timings_.push_back({"where_gapmsb_keygen", keygen_ms});
+        AddTiming(timings_, "setup", "where_gapmsb_keygen", keygen_ms);
         tfhe_ready_ = true;
     }
 
@@ -383,10 +348,9 @@ private:
                 static_cast<std::uint32_t>(runtime_.slots),
                 kLogQLwe));
         });
-        timings_.push_back({"repack_setup", setup_ms});
+        AddTiming(timings_, "setup", "repack_setup", setup_ms);
     }
 
-    static constexpr std::uint32_t kScaleBits = 29;
     static constexpr std::uint32_t kLogQLwe = 28;
 
     CkksRuntime& runtime_;
@@ -410,9 +374,9 @@ CkksCiphertext EncryptOneMask(
     std::vector<StageTiming>& timings,
     const std::string& name) {
     CkksCiphertext one;
-    timings.push_back({"where_constant_one_" + name, TimeMs([&] {
+    AddTiming(timings, "aggregation", "where_constant_one_" + name, TimeMs([&] {
         one = EncryptConstant(runtime.cc, runtime.keys.publicKey, 1.0, runtime.slots);
-    })});
+    }));
     return one;
 }
 
@@ -503,6 +467,12 @@ void AddParam(ExperimentResult& result, const std::string& name,
     result.parameters.push_back({name, std::to_string(value)});
 }
 
+void FinalizeHe3dbTiming(ExperimentResult& result) {
+    result.filter_time_ms = SumTimings(result.timings, "filter");
+    result.aggregation_time_ms = SumTimings(result.timings, "aggregation");
+    result.total_query_time_ms = result.filter_time_ms + result.aggregation_time_ms;
+}
+
 std::uint32_t CkksDepth(
     const ExperimentOptions& options,
     std::uint32_t default_depth) {
@@ -513,32 +483,23 @@ std::uint32_t CkksDepth(
 
 }  // namespace
 
-std::string MaskModeName(MaskInputMode mode) {
-    switch (mode) {
-    case MaskInputMode::TfheGapMSBRepack:
-        return "tfhe-gapmsb-compare-repacked";
-    case MaskInputMode::TfhePlainRepack:
-        return "tfhe-plaintext-mask-repacked";
-    case MaskInputMode::CkksEncryptedPlain:
-        return "ckks-encrypted-plain-mask";
-    }
-    return "unknown";
-}
-
 ExperimentOptions ParseExperimentOptions(int argc, char** argv) {
     ExperimentOptions options;
     for (int i = 1; i < argc; i++) {
         const std::string arg = argv[i];
-        if (arg == "--where-gapmsb") {
-            options.mask_mode = MaskInputMode::TfheGapMSBRepack;
-        } else if (arg == "--true-repack" || arg == "--tfhe-plain-mask") {
-            options.mask_mode = MaskInputMode::TfhePlainRepack;
-        } else if (arg == "--ckks-mask") {
-            options.mask_mode = MaskInputMode::CkksEncryptedPlain;
-        } else if (arg == "--rows" && i + 1 < argc) {
+        if (arg == "--rows" && i + 1 < argc) {
             options.rows = static_cast<std::size_t>(std::stoull(argv[++i]));
+        } else if (arg == "--row-exp" && i + 1 < argc) {
+            const auto exp = std::stoul(argv[++i]);
+            if (exp >= std::numeric_limits<std::size_t>::digits)
+                throw std::invalid_argument("row exponent is too large");
+            options.rows = std::size_t{1} << exp;
         } else if (arg == "--seed" && i + 1 < argc) {
             options.seed = static_cast<std::uint64_t>(std::stoull(argv[++i]));
+        } else if ((arg == "--output" || arg == "--output-file") && i + 1 < argc) {
+            options.output_path = argv[++i];
+        } else if (arg == "--system" && i + 1 < argc) {
+            options.system = argv[++i];
         } else if (arg == "--ckks-depth" && i + 1 < argc) {
             options.ckks_depth_override = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--kappa" && i + 1 < argc) {
@@ -569,31 +530,54 @@ ExperimentOptions ParseExperimentOptions(int argc, char** argv) {
             options.q14_shipdate_lower = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--q14-shipdate-upper" && i + 1 < argc) {
             options.q14_shipdate_upper = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--q14-shipdate-data-min" && i + 1 < argc) {
+            options.q14_shipdate_data_min = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--q14-shipdate-data-max" && i + 1 < argc) {
+            options.q14_shipdate_data_max = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--q14-type-domain" && i + 1 < argc) {
             options.q14_type_domain = static_cast<std::size_t>(std::stoull(argv[++i]));
+        } else if (arg == "--q14-promo-type" && i + 1 < argc) {
+            options.q14_promo_type = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--q3-key-domain" && i + 1 < argc) {
             options.q3_key_domain = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (arg == "--q3-priority-domain" && i + 1 < argc) {
             options.q3_priority_domain = static_cast<std::size_t>(std::stoull(argv[++i]));
+        } else if (arg == "--q3-segment-domain" && i + 1 < argc) {
+            options.q3_segment_domain = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (arg == "--q3-segment" && i + 1 < argc) {
             options.q3_customer_segment = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--q3-orderdate-base" && i + 1 < argc) {
+            options.q3_orderdate_base = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--q3-orderdate-step" && i + 1 < argc) {
+            options.q3_orderdate_step = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--q3-orderdate-upper" && i + 1 < argc) {
             options.q3_orderdate_upper = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--q3-shipdate-data-min" && i + 1 < argc) {
+            options.q3_shipdate_data_min = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--q3-shipdate-data-max" && i + 1 < argc) {
+            options.q3_shipdate_data_max = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--q3-shipdate-lower" && i + 1 < argc) {
             options.q3_shipdate_lower = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--q5-key-domain" && i + 1 < argc) {
             options.q5_key_domain = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (arg == "--q5-nation-domain" && i + 1 < argc) {
             options.q5_nation_domain = static_cast<std::size_t>(std::stoull(argv[++i]));
+        } else if (arg == "--q5-region-domain" && i + 1 < argc) {
+            options.q5_region_domain = static_cast<std::size_t>(std::stoull(argv[++i]));
         } else if (arg == "--q5-region" && i + 1 < argc) {
             options.q5_region = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--q5-orderdate-base" && i + 1 < argc) {
+            options.q5_orderdate_base = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--q5-orderdate-step" && i + 1 < argc) {
+            options.q5_orderdate_step = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--q5-orderdate-lower" && i + 1 < argc) {
             options.q5_orderdate_lower = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else if (arg == "--q5-orderdate-upper" && i + 1 < argc) {
             options.q5_orderdate_upper = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else {
             throw std::invalid_argument(
-                "usage: --rows N --seed S [--where-gapmsb|--tfhe-plain-mask|--ckks-mask] [query parameters]");
+                "usage: --rows N|--row-exp E --seed S "
+                "[--system ours|he3db|arcedb|all] [--output PATH] [query parameters]");
         }
     }
     if (options.rows == 0) throw std::invalid_argument("rows must be nonzero");
@@ -606,12 +590,18 @@ void PrintExperimentResult(const ExperimentResult& result, std::ostream& os) {
     os << "=== " << result.query_name << " ===\n";
     os << "rows=" << result.rows << " slots=" << result.slots
        << " mask_mode=" << result.mask_mode << "\n";
+    os << "system=" << result.system << "\n";
     if (!result.parameters.empty()) {
         os << "parameter,value\n";
         for (const auto& [name, value] : result.parameters)
             os << name << "," << value << "\n";
     }
     os << "predicate_errors=" << result.predicate_errors << "\n";
+    os << "he3db_timing_policy=filter excludes keygen/setup/repack; aggregation includes TFHE-to-CKKS repack and CKKS online aggregation\n";
+    os << "filter_time_ms=" << result.filter_time_ms << "\n";
+    os << "aggregation_time_ms=" << result.aggregation_time_ms << "\n";
+    os << "total_query_time_ms=" << result.total_query_time_ms << "\n";
+    os << "total_query_time_s=" << result.total_query_time_ms / 1000.0 << "\n";
     os << std::fixed << std::setprecision(6);
     if (!result.plain_groups.empty()) {
         os << "group,plain,encrypted,abs_error\n";
@@ -631,13 +621,23 @@ void PrintExperimentResult(const ExperimentResult& result, std::ostream& os) {
            << " encrypted=" << result.encrypted_scalar
            << " abs_error=" << result.abs_error << "\n";
     }
-    os << "stage,ms\n";
+    os << "stage_category,stage,ms\n";
     double total = 0.0;
     for (const auto& t : result.timings) {
-        os << t.name << "," << t.milliseconds << "\n";
+        os << t.category << "," << t.name << "," << t.milliseconds << "\n";
         total += t.milliseconds;
     }
-    os << "total_measured_ms," << total << "\n";
+    os << "all,total_measured_ms," << total << "\n";
+}
+
+void WriteExperimentResultIfRequested(
+    const ExperimentResult& result,
+    const ExperimentOptions& options) {
+    if (options.output_path.empty()) return;
+    std::ofstream out(options.output_path);
+    if (!out)
+        throw std::runtime_error("failed to open output file: " + options.output_path);
+    PrintExperimentResult(result, out);
 }
 
 ExperimentResult RunTpchQ6Experiment(const ExperimentOptions& options) {
@@ -646,7 +646,8 @@ ExperimentResult RunTpchQ6Experiment(const ExperimentOptions& options) {
     result.query_name = "TPC-H Q6 synthetic: TFHE GapMSB WHERE + CKKS SUM";
     result.rows = options.rows;
     result.slots = slots;
-    result.mask_mode = MaskModeName(options.mask_mode);
+    result.mask_mode = "tfhe-gapmsb-compare-repacked";
+    result.system = options.system;
     AddParam(result, "date_bits", options.date_bits);
     AddParam(result, "discount_bits", options.discount_bits);
     AddParam(result, "quantity_bits", options.quantity_bits);
@@ -656,6 +657,12 @@ ExperimentResult RunTpchQ6Experiment(const ExperimentOptions& options) {
     AddParam(result, "discount_lower", options.q6_discount_lower);
     AddParam(result, "discount_upper", options.q6_discount_upper);
     AddParam(result, "quantity_upper", options.q6_quantity_upper);
+    if (options.q6_shipdate_lower >= options.q6_shipdate_upper)
+        throw std::invalid_argument("q6 shipdate lower must be smaller than upper");
+    if (options.q6_discount_lower > options.q6_discount_upper)
+        throw std::invalid_argument("q6 discount lower must be no larger than upper");
+    if (options.q6_quantity_upper == 0)
+        throw std::invalid_argument("q6 quantity upper must be positive");
     if (options.q6_shipdate_lower < options.q6_shipdate_data_min ||
         options.q6_shipdate_upper < options.q6_shipdate_data_min ||
         options.q6_shipdate_data_max < options.q6_shipdate_data_min)
@@ -710,14 +717,17 @@ ExperimentResult RunTpchQ6Experiment(const ExperimentOptions& options) {
             plain += mask[i] ? revenue[i] : 0.0;
         }
         if (!mask.empty()) {
-            shipdate[0] =
-                std::min(options.q6_shipdate_upper - 1,
-                         options.q6_shipdate_lower + 1);
+            shipdate[0] = options.q6_shipdate_lower +
+                          (options.q6_shipdate_upper -
+                           options.q6_shipdate_lower) /
+                              2;
             shipdate_code[0] = shipdate[0] - options.q6_shipdate_data_min;
-            discount[0] = options.q6_discount_lower;
-            quantity[0] = options.q6_quantity_upper > 0
-                              ? options.q6_quantity_upper - 1
-                              : 0;
+            discount[0] = options.q6_discount_lower +
+                          (options.q6_discount_upper -
+                           options.q6_discount_lower) /
+                              2;
+            quantity[0] = std::max<std::uint32_t>(
+                1, options.q6_quantity_upper / 2);
             mask[0] = 1;
             revenue[0] = 90.0;
             plain = 0.0;
@@ -725,52 +735,53 @@ ExperimentResult RunTpchQ6Experiment(const ExperimentOptions& options) {
                 plain += mask[i] ? revenue[i] : 0.0;
         }
     });
-    result.timings.push_back({"generate_q6_data_and_plain_baseline", data_ms});
+    AddTiming(result.timings, "setup", "generate_q6_data_and_plain_baseline", data_ms);
 
     CkksRuntime runtime = MakeCkksRuntime(
         slots,
-        CkksDepth(options, options.mask_mode == MaskInputMode::TfheGapMSBRepack ? 20 : 6),
-        options.mask_mode != MaskInputMode::CkksEncryptedPlain);
+        CkksDepth(options, 20),
+        true);
     WhereEvaluator where(runtime, options, result.timings);
 
     CkksCiphertext ct_filter;
-    result.timings.push_back({"where_ckks_mask_product_q6", TimeMs([&] {
-        std::vector<CkksCiphertext> masks;
-        masks.push_back(GreaterEqualViaStrict(
-            where, runtime, result.timings, shipdate_code,
-            q6_shipdate_lower_code, options.date_bits, "q6_shipdate",
-            result.predicate_errors));
-        masks.push_back(where.CompareConstant(
-            shipdate_code, q6_shipdate_upper_code, options.date_bits,
-            ComparePredicate::LessThan, "q6_shipdate_lt",
-            &result.predicate_errors));
-        masks.push_back(GreaterEqualViaStrict(
-            where, runtime, result.timings, discount,
-            options.q6_discount_lower, options.discount_bits, "q6_discount",
-            result.predicate_errors));
-        masks.push_back(LessEqualViaStrict(
-            where, discount, options.q6_discount_upper, options.discount_bits,
-            "q6_discount", result.predicate_errors));
-        masks.push_back(where.CompareConstant(
-            quantity, options.q6_quantity_upper, options.quantity_bits,
-            ComparePredicate::LessThan, "q6_quantity_lt",
-            &result.predicate_errors));
-        ct_filter = MultiplyBalanced(runtime.cc, masks);
-    })});
+    std::vector<CkksCiphertext> q6_masks;
+    q6_masks.push_back(GreaterEqualViaStrict(
+        where, runtime, result.timings, shipdate_code,
+        q6_shipdate_lower_code, options.date_bits, "q6_shipdate",
+        result.predicate_errors));
+    q6_masks.push_back(where.CompareConstant(
+        shipdate_code, q6_shipdate_upper_code, options.date_bits,
+        ComparePredicate::LessThan, "q6_shipdate_lt",
+        &result.predicate_errors));
+    q6_masks.push_back(GreaterEqualViaStrict(
+        where, runtime, result.timings, discount,
+        options.q6_discount_lower, options.discount_bits, "q6_discount",
+        result.predicate_errors));
+    q6_masks.push_back(LessEqualViaStrict(
+        where, discount, options.q6_discount_upper, options.discount_bits,
+        "q6_discount", result.predicate_errors));
+    q6_masks.push_back(where.CompareConstant(
+        quantity, options.q6_quantity_upper, options.quantity_bits,
+        ComparePredicate::LessThan, "q6_quantity_lt",
+        &result.predicate_errors));
+    AddTiming(result.timings, "aggregation", "where_ckks_mask_product_q6", TimeMs([&] {
+        ct_filter = MultiplyBalanced(runtime.cc, q6_masks);
+    }));
     CkksCiphertext ct_revenue;
-    result.timings.push_back({"encrypt_revenue_ckks", TimeMs([&] {
+    AddTiming(result.timings, "setup", "encrypt_revenue_ckks", TimeMs([&] {
         ct_revenue = EncryptColumn(runtime, revenue);
-    })});
+    }));
 
     CkksCiphertext ct_sum;
-    result.timings.push_back({"ckks_mask_mul_rotate_sum", TimeMs([&] {
+    AddTiming(result.timings, "aggregation", "ckks_mask_mul_rotate_sum", TimeMs([&] {
         auto filtered = runtime.cc->EvalMult(ct_filter, ct_revenue);
         ct_sum = EvalRotateAndSum(runtime.cc, filtered, runtime.slots);
-    })});
+    }));
 
     result.plain_scalar = plain;
     result.encrypted_scalar = DecryptSlot0(runtime, ct_sum);
     result.abs_error = std::abs(result.plain_scalar - result.encrypted_scalar);
+    FinalizeHe3dbTiming(result);
     return result;
 }
 
@@ -781,19 +792,31 @@ ExperimentResult RunTpchQ14Experiment(const ExperimentOptions& options) {
     result.query_name = "TPC-H Q14 synthetic: TFHE GapMSB WHERE + CKKS promo GROUP BY";
     result.rows = options.rows;
     result.slots = slots;
-    result.mask_mode = MaskModeName(options.mask_mode);
+    result.mask_mode = "tfhe-gapmsb-compare-repacked";
+    result.system = options.system;
     AddParam(result, "date_bits", options.date_bits);
     AddParam(result, "compare_kappa", options.compare_kappa);
     AddParam(result, "shipdate_lower", options.q14_shipdate_lower);
     AddParam(result, "shipdate_upper", options.q14_shipdate_upper);
+    AddParam(result, "shipdate_data_min", options.q14_shipdate_data_min);
+    AddParam(result, "shipdate_data_max", options.q14_shipdate_data_max);
     AddParam(result, "type_domain", type_domain);
+    AddParam(result, "promo_type", options.q14_promo_type);
     if (type_domain == 0) throw std::invalid_argument("q14 type domain must be nonzero");
+    if (options.q14_promo_type >= type_domain)
+        throw std::invalid_argument("q14 promo type must be inside the type domain");
+    if (options.q14_shipdate_data_min > options.q14_shipdate_data_max)
+        throw std::invalid_argument("q14 shipdate data range is invalid");
+    if (options.q14_shipdate_lower >= options.q14_shipdate_upper)
+        throw std::invalid_argument("q14 shipdate lower must be smaller than upper");
     RequireComparable(options.q14_shipdate_lower, options.date_bits, "q14 shipdate lower");
     RequireComparable(options.q14_shipdate_upper, options.date_bits, "q14 shipdate upper");
+    RequireComparable(options.q14_shipdate_data_max, options.date_bits, "q14 shipdate data max");
 
     std::mt19937_64 rng(options.seed);
     std::uniform_int_distribution<int> type_dist(0, static_cast<int>(type_domain - 1));
-    std::uniform_int_distribution<std::uint32_t> date_dist(100, 200);
+    std::uniform_int_distribution<std::uint32_t> date_dist(
+        options.q14_shipdate_data_min, options.q14_shipdate_data_max);
     std::uniform_real_distribution<double> price_dist(1.0, 100.0);
     std::uniform_real_distribution<double> discount_dist(0.0, 0.10);
 
@@ -803,7 +826,7 @@ ExperimentResult RunTpchQ14Experiment(const ExperimentOptions& options) {
     std::vector<double> revenue(options.rows);
     std::vector<double> plain_groups(type_domain, 0.0);
 
-    result.timings.push_back({"generate_q14_data_and_plain_baseline", TimeMs([&] {
+    AddTiming(result.timings, "setup", "generate_q14_data_and_plain_baseline", TimeMs([&] {
         for (std::size_t i = 0; i < options.rows; i++) {
             shipdate[i] = date_dist(rng);
             part_type[i] = static_cast<std::uint32_t>(type_dist(rng));
@@ -815,51 +838,54 @@ ExperimentResult RunTpchQ14Experiment(const ExperimentOptions& options) {
             if (mask[i]) plain_groups[part_type[i]] += revenue[i];
         }
         if (!mask.empty()) {
-            shipdate[0] = options.q14_shipdate_lower;
+            shipdate[0] = options.q14_shipdate_lower +
+                          (options.q14_shipdate_upper -
+                           options.q14_shipdate_lower) /
+                              2;
             mask[0] = 1;
-            part_type[0] = 0;
+            part_type[0] = options.q14_promo_type;
             revenue[0] = 50.0;
             std::fill(plain_groups.begin(), plain_groups.end(), 0.0);
             for (std::size_t i = 0; i < options.rows; i++)
                 if (mask[i]) plain_groups[part_type[i]] += revenue[i];
         }
-    })});
+    }));
 
     CkksRuntime runtime = MakeCkksRuntime(
         slots,
-        CkksDepth(options, options.mask_mode == MaskInputMode::TfheGapMSBRepack ? 24 : 10),
-        options.mask_mode != MaskInputMode::CkksEncryptedPlain);
+        CkksDepth(options, 24),
+        true);
     WhereEvaluator where(runtime, options, result.timings);
     const auto domain = MakeDomain(type_domain);
 
     CkksCiphertext ct_mask;
-    result.timings.push_back({"where_ckks_mask_product_q14", TimeMs([&] {
-        std::vector<CkksCiphertext> masks;
-        masks.push_back(GreaterEqualViaStrict(
-            where, runtime, result.timings, shipdate,
-            options.q14_shipdate_lower, options.date_bits, "q14_shipdate",
-            result.predicate_errors));
-        masks.push_back(where.CompareConstant(
-            shipdate, options.q14_shipdate_upper, options.date_bits,
-            ComparePredicate::LessThan, "q14_shipdate_lt",
-            &result.predicate_errors));
-        ct_mask = MultiplyBalanced(runtime.cc, masks);
-    })});
+    std::vector<CkksCiphertext> q14_masks;
+    q14_masks.push_back(GreaterEqualViaStrict(
+        where, runtime, result.timings, shipdate,
+        options.q14_shipdate_lower, options.date_bits, "q14_shipdate",
+        result.predicate_errors));
+    q14_masks.push_back(where.CompareConstant(
+        shipdate, options.q14_shipdate_upper, options.date_bits,
+        ComparePredicate::LessThan, "q14_shipdate_lt",
+        &result.predicate_errors));
+    AddTiming(result.timings, "aggregation", "where_ckks_mask_product_q14", TimeMs([&] {
+        ct_mask = MultiplyBalanced(runtime.cc, q14_masks);
+    }));
     CkksCiphertext ct_type, ct_revenue, ct_masked_revenue;
-    result.timings.push_back({"encrypt_type_and_revenue_ckks", TimeMs([&] {
+    AddTiming(result.timings, "setup", "encrypt_type_and_revenue_ckks", TimeMs([&] {
         ct_type = EncryptColumn(runtime, part_type);
         ct_revenue = EncryptColumn(runtime, revenue);
-    })});
-    result.timings.push_back({"apply_filter_mask", TimeMs([&] {
+    }));
+    AddTiming(result.timings, "aggregation", "apply_filter_mask", TimeMs([&] {
         ct_masked_revenue = runtime.cc->EvalMult(ct_mask, ct_revenue);
-    })});
+    }));
 
     std::vector<CkksCiphertext> group_sums;
-    result.timings.push_back({"matrix_group_by_sum", TimeMs([&] {
+    AddTiming(result.timings, "aggregation", "matrix_group_by_sum", TimeMs([&] {
         group_sums = MatrixGroupBySum(
             runtime.cc, runtime.keys.publicKey, domain.attrs, {ct_type},
             ct_masked_revenue, domain.basis, domain.alpha, runtime.slots);
-    })});
+    }));
 
     result.plain_groups = plain_groups;
     result.encrypted_groups = DecryptGroupSums(runtime, group_sums);
@@ -867,8 +893,12 @@ ExperimentResult RunTpchQ14Experiment(const ExperimentOptions& options) {
     const double plain_total = std::accumulate(plain_groups.begin(), plain_groups.end(), 0.0);
     const double enc_total = std::accumulate(
         result.encrypted_groups.begin(), result.encrypted_groups.end(), 0.0);
-    result.plain_scalar = plain_total == 0.0 ? 0.0 : 100.0 * plain_groups[0] / plain_total;
-    result.encrypted_scalar = enc_total == 0.0 ? 0.0 : 100.0 * result.encrypted_groups[0] / enc_total;
+    const auto promo = static_cast<std::size_t>(options.q14_promo_type);
+    result.plain_scalar =
+        plain_total == 0.0 ? 0.0 : 100.0 * plain_groups[promo] / plain_total;
+    result.encrypted_scalar =
+        enc_total == 0.0 ? 0.0 : 100.0 * result.encrypted_groups[promo] / enc_total;
+    FinalizeHe3dbTiming(result);
     return result;
 }
 
@@ -880,26 +910,47 @@ ExperimentResult RunTpchQ3Experiment(const ExperimentOptions& options) {
     result.query_name = "TPC-H Q3 synthetic: TFHE GapMSB WHERE + CKKS joins + order/priority GROUP BY";
     result.rows = options.rows;
     result.slots = slots;
-    result.mask_mode = MaskModeName(options.mask_mode);
+    result.mask_mode = "tfhe-gapmsb-compare-repacked";
+    result.system = options.system;
     AddParam(result, "date_bits", options.date_bits);
     AddParam(result, "key_bits", options.key_bits);
     AddParam(result, "compare_kappa", options.compare_kappa);
     AddParam(result, "key_domain", key_domain);
     AddParam(result, "priority_domain", priority_domain);
+    AddParam(result, "segment_domain", options.q3_segment_domain);
     AddParam(result, "customer_segment", options.q3_customer_segment);
+    AddParam(result, "orderdate_base", options.q3_orderdate_base);
+    AddParam(result, "orderdate_step", options.q3_orderdate_step);
     AddParam(result, "orderdate_upper", options.q3_orderdate_upper);
+    AddParam(result, "shipdate_data_min", options.q3_shipdate_data_min);
+    AddParam(result, "shipdate_data_max", options.q3_shipdate_data_max);
     AddParam(result, "shipdate_lower", options.q3_shipdate_lower);
     if (key_domain == 0) throw std::invalid_argument("q3 key domain must be nonzero");
     if (priority_domain == 0) throw std::invalid_argument("q3 priority domain must be nonzero");
+    if (options.q3_segment_domain == 0)
+        throw std::invalid_argument("q3 segment domain must be nonzero");
     RequireComparable(key_domain - 1, options.key_bits, "q3 key domain");
     RequireComparable(priority_domain - 1, options.key_bits, "q3 priority domain");
+    RequireComparable(options.q3_segment_domain - 1, options.key_bits, "q3 segment domain");
     RequireComparable(options.q3_customer_segment, options.key_bits, "q3 segment");
+    if (options.q3_customer_segment >= options.q3_segment_domain)
+        throw std::invalid_argument("q3 segment must be inside the segment domain");
     RequireComparable(options.q3_orderdate_upper, options.date_bits, "q3 orderdate upper");
+    RequireComparable(options.q3_orderdate_base +
+                          options.q3_orderdate_step *
+                              static_cast<std::uint32_t>(key_domain - 1),
+                      options.date_bits, "q3 generated orderdate max");
+    if (options.q3_shipdate_data_min > options.q3_shipdate_data_max)
+        throw std::invalid_argument("q3 shipdate data range is invalid");
+    if (options.q3_shipdate_lower >= options.q3_shipdate_data_max)
+        throw std::invalid_argument("q3 shipdate lower must leave at least one passing generated date");
+    RequireComparable(options.q3_shipdate_data_max, options.date_bits, "q3 shipdate data max");
     RequireComparable(options.q3_shipdate_lower, options.date_bits, "q3 shipdate lower");
 
     std::mt19937_64 rng(options.seed);
     std::uniform_int_distribution<int> key_dist(0, static_cast<int>(key_domain - 1));
-    std::uniform_int_distribution<int> date_dist(100, 200);
+    std::uniform_int_distribution<std::uint32_t> date_dist(
+        options.q3_shipdate_data_min, options.q3_shipdate_data_max);
     std::uniform_real_distribution<double> price_dist(1.0, 50.0);
     std::uniform_real_distribution<double> discount_dist(0.0, 0.10);
 
@@ -911,16 +962,19 @@ ExperimentResult RunTpchQ3Experiment(const ExperimentOptions& options) {
     std::vector<int> customer_segment_mask(slots), order_date_mask(slots), line_ship_mask(options.rows);
     std::vector<double> plain_groups(key_domain * priority_domain, 0.0);
 
-    result.timings.push_back({"generate_q3_data_and_plain_baseline", TimeMs([&] {
+    AddTiming(result.timings, "setup", "generate_q3_data_and_plain_baseline", TimeMs([&] {
         for (std::size_t j = 0; j < key_domain; j++) {
             customer_key[j] = static_cast<std::uint32_t>(j);
-            customer_seg[j] = (j == 0 || j == 2) ? 0 : 1;
+            customer_seg[j] =
+                static_cast<std::uint32_t>(j % options.q3_segment_domain);
             customer_segment_mask[j] =
                 customer_seg[j] == options.q3_customer_segment ? 1 : 0;
             order_key[j] = static_cast<std::uint32_t>(j);
             order_customer_key[j] = static_cast<std::uint32_t>(j % key_domain);
             order_priority[j] = static_cast<std::uint32_t>(j % priority_domain);
-            order_date[j] = 120 + static_cast<std::uint32_t>(10 * j);
+            order_date[j] = options.q3_orderdate_base +
+                            options.q3_orderdate_step *
+                                static_cast<std::uint32_t>(j);
             order_date_mask[j] =
                 order_date[j] < options.q3_orderdate_upper ? 1 : 0;
         }
@@ -936,7 +990,7 @@ ExperimentResult RunTpchQ3Experiment(const ExperimentOptions& options) {
         }
         for (std::size_t i = 0; i < options.rows; i++) {
             line_order_key[i] = static_cast<std::uint32_t>(key_dist(rng));
-            line_shipdate[i] = static_cast<std::uint32_t>(date_dist(rng));
+            line_shipdate[i] = date_dist(rng);
             revenue[i] = price_dist(rng) * (1.0 - discount_dist(rng));
             line_ship_mask[i] =
                 line_shipdate[i] > options.q3_shipdate_lower ? 1 : 0;
@@ -948,7 +1002,12 @@ ExperimentResult RunTpchQ3Experiment(const ExperimentOptions& options) {
         }
         if (!line_order_key.empty()) {
             line_order_key[0] = 0;
-            line_shipdate[0] = options.q3_shipdate_lower + 1;
+            line_shipdate[0] = options.q3_shipdate_lower +
+                               std::max<std::uint32_t>(
+                                   1,
+                                   (options.q3_shipdate_data_max -
+                                    options.q3_shipdate_lower) /
+                                       2);
             line_ship_mask[0] = 1;
             revenue[0] = 30.0;
             std::fill(plain_groups.begin(), plain_groups.end(), 0.0);
@@ -960,45 +1019,43 @@ ExperimentResult RunTpchQ3Experiment(const ExperimentOptions& options) {
                     plain_groups[ok + key_domain * pr] += revenue[i];
             }
         }
-    })});
+    }));
 
     CkksRuntime runtime = MakeCkksRuntime(
         slots,
-        CkksDepth(options, options.mask_mode == MaskInputMode::TfheGapMSBRepack ? 32 : 18),
-        options.mask_mode != MaskInputMode::CkksEncryptedPlain);
+        CkksDepth(options, 32),
+        true);
     WhereEvaluator where(runtime, options, result.timings);
     const auto domain = MakeDomain(key_domain);
     const auto group_domain = MakeDomain({key_domain, priority_domain});
 
     CkksCiphertext ct_customer_key, ct_order_customer_key, ct_order_key, ct_order_priority;
     CkksCiphertext ct_line_order_key, ct_revenue;
-    result.timings.push_back({"encrypt_join_and_value_columns_ckks", TimeMs([&] {
+    AddTiming(result.timings, "setup", "encrypt_join_and_value_columns_ckks", TimeMs([&] {
         ct_customer_key = EncryptColumn(runtime, customer_key);
         ct_order_customer_key = EncryptColumn(runtime, order_customer_key);
         ct_order_key = EncryptColumn(runtime, order_key);
         ct_order_priority = EncryptColumn(runtime, order_priority);
         ct_line_order_key = EncryptColumn(runtime, PadU32(line_order_key, slots));
         ct_revenue = EncryptColumn(runtime, PadRevenue(revenue, slots));
-    })});
+    }));
 
     CkksCiphertext ct_customer_segment, ct_order_date, ct_line_ship;
-    result.timings.push_back({"where_ckks_mask_product_q3", TimeMs([&] {
-        ct_customer_segment = EqualViaStrictRange(
-            where, runtime, result.timings, customer_seg,
-            options.q3_customer_segment, options.key_bits,
-            "q3_customer_segment", result.predicate_errors);
-        ct_order_date = where.CompareConstant(
-            order_date, options.q3_orderdate_upper, options.date_bits,
-            ComparePredicate::LessThan, "q3_orderdate_lt",
-            &result.predicate_errors);
-        ct_line_ship = where.CompareConstant(
-            line_shipdate, options.q3_shipdate_lower, options.date_bits,
-            ComparePredicate::GreaterThan, "q3_line_shipdate_gt",
-            &result.predicate_errors);
-    })});
+    ct_customer_segment = EqualViaStrictRange(
+        where, runtime, result.timings, customer_seg,
+        options.q3_customer_segment, options.key_bits,
+        "q3_customer_segment", result.predicate_errors);
+    ct_order_date = where.CompareConstant(
+        order_date, options.q3_orderdate_upper, options.date_bits,
+        ComparePredicate::LessThan, "q3_orderdate_lt",
+        &result.predicate_errors);
+    ct_line_ship = where.CompareConstant(
+        line_shipdate, options.q3_shipdate_lower, options.date_bits,
+        ComparePredicate::GreaterThan, "q3_line_shipdate_gt",
+        &result.predicate_errors);
 
     std::vector<CkksCiphertext> group_sums;
-    result.timings.push_back({"ckks_lookup_join_join_groupby", TimeMs([&] {
+    AddTiming(result.timings, "aggregation", "ckks_lookup_join_join_groupby", TimeMs([&] {
         auto order_segment = LookupJoin(
             runtime.cc, runtime.keys.publicKey, ct_order_customer_key, {},
             ct_customer_key, {ct_customer_segment}, domain.basis, domain.alpha,
@@ -1018,7 +1075,7 @@ ExperimentResult RunTpchQ3Experiment(const ExperimentOptions& options) {
             runtime.cc, runtime.keys.publicKey, group_domain.attrs,
             {ct_line_order_key, line_order_priority}, filtered_revenue,
             group_domain.basis, group_domain.alpha, runtime.slots);
-    })});
+    }));
 
     result.plain_groups = plain_groups;
     result.encrypted_groups = DecryptGroupSums(runtime, group_sums);
@@ -1026,6 +1083,7 @@ ExperimentResult RunTpchQ3Experiment(const ExperimentOptions& options) {
     result.plain_scalar = std::accumulate(plain_groups.begin(), plain_groups.end(), 0.0);
     result.encrypted_scalar = std::accumulate(
         result.encrypted_groups.begin(), result.encrypted_groups.end(), 0.0);
+    FinalizeHe3dbTiming(result);
     return result;
 }
 
@@ -1038,26 +1096,39 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
     result.query_name = "TPC-H Q5 synthetic: TFHE GapMSB WHERE + CKKS multijoin + nation GROUP BY";
     result.rows = options.rows;
     result.slots = slots;
-    result.mask_mode = MaskModeName(options.mask_mode);
+    result.mask_mode = "tfhe-gapmsb-compare-repacked";
+    result.system = options.system;
     AddParam(result, "date_bits", options.date_bits);
     AddParam(result, "key_bits", options.key_bits);
     AddParam(result, "compare_kappa", options.compare_kappa);
     AddParam(result, "key_domain", key_domain);
     AddParam(result, "nation_domain", nation_domain);
+    AddParam(result, "region_domain", options.q5_region_domain);
     AddParam(result, "region", options.q5_region);
+    AddParam(result, "orderdate_base", options.q5_orderdate_base);
+    AddParam(result, "orderdate_step", options.q5_orderdate_step);
     AddParam(result, "orderdate_lower", options.q5_orderdate_lower);
     AddParam(result, "orderdate_upper", options.q5_orderdate_upper);
     if (key_domain == 0) throw std::invalid_argument("q5 key domain must be nonzero");
     if (nation_domain == 0) throw std::invalid_argument("q5 nation domain must be nonzero");
+    if (options.q5_region_domain == 0) throw std::invalid_argument("q5 region domain must be nonzero");
     RequireComparable(key_domain - 1, options.key_bits, "q5 key domain");
     RequireComparable(nation_domain - 1, options.key_bits, "q5 nation domain");
+    RequireComparable(options.q5_region_domain - 1, options.key_bits, "q5 region domain");
     RequireComparable(options.q5_region, options.key_bits, "q5 region");
+    if (options.q5_region >= options.q5_region_domain)
+        throw std::invalid_argument("q5 region must be inside the region domain");
+    RequireComparable(options.q5_orderdate_base +
+                          options.q5_orderdate_step *
+                              static_cast<std::uint32_t>(key_domain - 1),
+                      options.date_bits, "q5 generated orderdate max");
     RequireComparable(options.q5_orderdate_lower, options.date_bits, "q5 orderdate lower");
     RequireComparable(options.q5_orderdate_upper, options.date_bits, "q5 orderdate upper");
+    if (options.q5_orderdate_lower >= options.q5_orderdate_upper)
+        throw std::invalid_argument("q5 orderdate lower must be smaller than upper");
 
     std::mt19937_64 rng(options.seed);
     std::uniform_int_distribution<int> key_dist(0, static_cast<int>(key_domain - 1));
-    std::uniform_int_distribution<int> date_dist(100, 200);
     std::uniform_real_distribution<double> price_dist(1.0, 50.0);
     std::uniform_real_distribution<double> discount_dist(0.0, 0.10);
 
@@ -1070,10 +1141,10 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
     std::vector<int> nation_asia_mask(slots), order_date_mask(slots);
     std::vector<double> plain_groups(nation_domain, 0.0);
 
-    result.timings.push_back({"generate_q5_data_and_plain_baseline", TimeMs([&] {
+    AddTiming(result.timings, "setup", "generate_q5_data_and_plain_baseline", TimeMs([&] {
         for (std::size_t j = 0; j < nation_domain; j++) {
             nation_key[j] = static_cast<std::uint32_t>(j);
-            nation_region[j] = static_cast<std::uint32_t>(j % 2);
+            nation_region[j] = static_cast<std::uint32_t>(j % options.q5_region_domain);
             nation_asia_mask[j] = nation_region[j] == options.q5_region ? 1 : 0;
         }
         for (std::size_t j = nation_domain; j < slots; j++) {
@@ -1088,7 +1159,9 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
             supplier_nation[j] = static_cast<std::uint32_t>(j % nation_domain);
             order_key[j] = static_cast<std::uint32_t>(j);
             order_customer_key[j] = static_cast<std::uint32_t>(j % key_domain);
-            order_date[j] = 120 + static_cast<std::uint32_t>(10 * j);
+            order_date[j] = options.q5_orderdate_base +
+                            options.q5_orderdate_step *
+                                static_cast<std::uint32_t>(j);
             order_date_mask[j] =
                 order_date[j] >= options.q5_orderdate_lower &&
                         order_date[j] < options.q5_orderdate_upper
@@ -1121,7 +1194,10 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
                 static_cast<std::uint32_t>(std::min<std::size_t>(2, key_domain - 1));
             line_order_key[0] = forced_key;
             line_supp_key[0] = forced_key;
-            order_date[forced_key] = options.q5_orderdate_lower;
+            order_date[forced_key] = options.q5_orderdate_lower +
+                                     (options.q5_orderdate_upper -
+                                      options.q5_orderdate_lower) /
+                                         2;
             order_date_mask[forced_key] = 1;
             customer_nation[order_customer_key[forced_key]] =
                 static_cast<std::uint32_t>(forced_key % nation_domain);
@@ -1140,12 +1216,12 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
                     plain_groups[sn] += revenue[i];
             }
         }
-    })});
+    }));
 
     CkksRuntime runtime = MakeCkksRuntime(
         slots,
-        CkksDepth(options, options.mask_mode == MaskInputMode::TfheGapMSBRepack ? 36 : 18),
-        options.mask_mode != MaskInputMode::CkksEncryptedPlain);
+        CkksDepth(options, 36),
+        true);
     WhereEvaluator where(runtime, options, result.timings);
     const auto key_dom = MakeDomain(key_domain);
     const auto nation_dom = MakeDomain(nation_domain);
@@ -1154,7 +1230,7 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
     CkksCiphertext ct_supplier_key, ct_supplier_nation;
     CkksCiphertext ct_order_key, ct_order_customer_key;
     CkksCiphertext ct_line_order_key, ct_line_supp_key, ct_revenue;
-    result.timings.push_back({"encrypt_six_table_columns_ckks", TimeMs([&] {
+    AddTiming(result.timings, "setup", "encrypt_six_table_columns_ckks", TimeMs([&] {
         ct_nation_key = EncryptColumn(runtime, nation_key);
         ct_customer_key = EncryptColumn(runtime, customer_key);
         ct_customer_nation = EncryptColumn(runtime, customer_nation);
@@ -1165,26 +1241,26 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
         ct_line_order_key = EncryptColumn(runtime, PadU32(line_order_key, slots));
         ct_line_supp_key = EncryptColumn(runtime, PadU32(line_supp_key, slots));
         ct_revenue = EncryptColumn(runtime, PadRevenue(revenue, slots));
-    })});
+    }));
 
     CkksCiphertext ct_nation_asia, ct_order_date;
-    result.timings.push_back({"where_ckks_mask_product_q5", TimeMs([&] {
-        ct_nation_asia = EqualViaStrictRange(
-            where, runtime, result.timings, nation_region, options.q5_region,
-            options.key_bits, "q5_region", result.predicate_errors);
-        auto order_date_ge = GreaterEqualViaStrict(
-            where, runtime, result.timings, order_date,
-            options.q5_orderdate_lower, options.date_bits, "q5_orderdate",
-            result.predicate_errors);
-        auto order_date_lt = where.CompareConstant(
-            order_date, options.q5_orderdate_upper, options.date_bits,
-            ComparePredicate::LessThan, "q5_orderdate_lt",
-            &result.predicate_errors);
+    ct_nation_asia = EqualViaStrictRange(
+        where, runtime, result.timings, nation_region, options.q5_region,
+        options.key_bits, "q5_region", result.predicate_errors);
+    auto order_date_ge = GreaterEqualViaStrict(
+        where, runtime, result.timings, order_date,
+        options.q5_orderdate_lower, options.date_bits, "q5_orderdate",
+        result.predicate_errors);
+    auto order_date_lt = where.CompareConstant(
+        order_date, options.q5_orderdate_upper, options.date_bits,
+        ComparePredicate::LessThan, "q5_orderdate_lt",
+        &result.predicate_errors);
+    AddTiming(result.timings, "aggregation", "where_ckks_mask_product_q5", TimeMs([&] {
         ct_order_date = runtime.cc->EvalMult(order_date_ge, order_date_lt);
-    })});
+    }));
 
     std::vector<CkksCiphertext> group_sums;
-    result.timings.push_back({"ckks_multijoin_groupby", TimeMs([&] {
+    AddTiming(result.timings, "aggregation", "ckks_multijoin_groupby", TimeMs([&] {
         auto order_customer_nation = LookupJoin(
             runtime.cc, runtime.keys.publicKey, ct_order_customer_key, {},
             ct_customer_key, {ct_customer_nation}, key_dom.basis, key_dom.alpha,
@@ -1218,7 +1294,7 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
             runtime.cc, runtime.keys.publicKey, nation_dom.attrs,
             {line_supplier_nation}, filtered_revenue, nation_dom.basis,
             nation_dom.alpha, runtime.slots);
-    })});
+    }));
 
     result.plain_groups = plain_groups;
     result.encrypted_groups = DecryptGroupSums(runtime, group_sums);
@@ -1226,6 +1302,7 @@ ExperimentResult RunTpchQ5Experiment(const ExperimentOptions& options) {
     result.plain_scalar = std::accumulate(plain_groups.begin(), plain_groups.end(), 0.0);
     result.encrypted_scalar = std::accumulate(
         result.encrypted_groups.begin(), result.encrypted_groups.end(), 0.0);
+    FinalizeHe3dbTiming(result);
     return result;
 }
 

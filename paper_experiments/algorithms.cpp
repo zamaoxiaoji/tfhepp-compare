@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <numeric>
+#include <ostream>
 #include <stdexcept>
 #include <utility>
 
@@ -155,12 +157,35 @@ std::vector<std::string> Chapter3AlgorithmTrace() {
     return {
         "BitExtract: build 0/Q/2 bit LUT, run Meta-PBS Algorithm 1, apply M_k=2^(p-k) pruning only in the first blind rotation.",
         "GapMSB: extract bit_k, convert it to arithmetic weight w_k*Delta, subtract it from ct_I, add offset'=(w_k+1)Delta/2, then run sign PBS.",
-        "HomCompare: subtract operands, run recursive HomMSB/GapMSB on the signed difference, and use the predicate direction to choose the subtraction order.",
+        "HomCompare: subtract operands, run recursive HomMSB on the signed difference; each recursive clear adds offset2=w_k*Delta/2 immediately, and the base sign PBS uses offset1=Delta/2.",
     };
 }
 
 std::string SecuritySummary() {
     return "TFHEpp default params/128bit.hpp and OpenFHE HEStd_128_classic/STD128 are used; no 80-bit parameter option is enabled by paper_experiments.";
+}
+
+std::ostream* OpenOptionalOutputFile(
+    int& index,
+    int argc,
+    char** argv,
+    std::unique_ptr<std::ofstream>& file) {
+    const std::string arg = argv[index];
+    if (arg != "--output" && arg != "--output-file") return nullptr;
+    if (index + 1 >= argc)
+        throw std::invalid_argument("--output requires a file path");
+    file = std::make_unique<std::ofstream>(argv[++index]);
+    if (!*file)
+        throw std::runtime_error("failed to open output file: " + std::string(argv[index]));
+    return file.get();
+}
+
+void WriteOutputLine(
+    std::ostream& primary,
+    std::ostream* secondary,
+    const std::string& line) {
+    primary << line << "\n";
+    if (secondary) *secondary << line << "\n";
 }
 
 std::size_t TotalDomainSize(const std::vector<AttributeSpec>& attrs) {

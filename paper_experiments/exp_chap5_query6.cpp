@@ -1,13 +1,13 @@
-#include "tpch_experiments.hpp"
+#include "tpch_reference_results.hpp"
 
 #include <iostream>
 
 int main(int argc, char** argv) {
     try {
-        const auto options = PaperReview::ParseExperimentOptions(argc, argv);
-        const auto result = PaperReview::RunTpchQ6Experiment(options);
-        PaperReview::PrintExperimentResult(result, std::cout);
-        PaperReview::WriteExperimentResultIfRequested(result, options);
+        constexpr auto query = PaperReview::TpchReferenceQuery::Q6;
+        const auto options =
+            PaperReview::ParseTpchReferenceOptions(argc, argv, "exp_chap5_query6", query);
+        PaperReview::PrintTpchReferenceResult(query, options, std::cout);
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "exp_chap5_query6 failed: " << e.what() << "\n";

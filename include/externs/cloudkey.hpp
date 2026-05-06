@@ -141,42 +141,4 @@ TFHEPP_EXPLICIT_INSTANTIATION_ANNIHILATE(INST)
 TFHEPP_EXPLICIT_INSTANTIATION_ANNIHILATE(INST)
 #undef INST
 
-// Extern template definitions for get<T>() helper functions
-#define INST(P) extern template auto& EvalKey::get<BootstrappingKey<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_BLIND_ROTATE(INST)
-#undef INST
-
-#define INST(P) extern template auto& EvalKey::get<BootstrappingKeyFFT<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_BLIND_ROTATE(INST)
-#undef INST
-
-#define INST(P) extern template auto& EvalKey::get<BootstrappingKeyNTT<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_BLIND_ROTATE(INST)
-#undef INST
-
-#define INST(P) extern template auto& EvalKey::get<KeySwitchingKey<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_KEY_SWITCH_TO_TLWE(INST)
-#undef INST
-
-#define INST(P) extern template auto& EvalKey::get<SubsetKeySwitchingKey<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_SUBSET_KEY_SWITCH_TO_TLWE(INST)
-#undef INST
-
-#define INST(P) extern template auto& EvalKey::get<AnnihilateKey<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_ANNIHILATE(INST)
-#undef INST
-
-#define INST(P) extern template auto& EvalKey::get<CBswitchingKey<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_ANNIHILATE(INST)
-#undef INST
-
-// Extern template definitions for get_map<T>() helper functions
-#define INST(P) extern template auto& EvalKey::get_map<PrivateKeySwitchingKey<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_KEY_SWITCH_TO_TRLWE(INST)
-#undef INST
-
-#define INST(P) extern template auto& EvalKey::get_map<SubsetPrivateKeySwitchingKey<P>>()
-TFHEPP_EXPLICIT_INSTANTIATION_SUBSET_KEY_SWITCH_TO_TRLWE(INST)
-#undef INST
-
 }

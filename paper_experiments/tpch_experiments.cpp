@@ -242,18 +242,20 @@ public:
             TFHEpp::tlweSymEncrypt<P_in>(
                 rhs_ct, EncodeInteger<P_in>(constant, comparison_bits),
                 P_in::α, sk_.key.get<P_in>());
-            for (std::size_t i = 0; i < values.size(); i++) {
+            #pragma omp parallel for schedule(dynamic) reduction(+:local_errors)
+            for (std::int64_t i = 0; i < static_cast<std::int64_t>(values.size()); i++) {
                 TFHEpp::TLWE<P_in> lhs_ct{};
                 TFHEpp::tlweSymEncrypt<P_in>(
-                    lhs_ct, EncodeInteger<P_in>(values[i], comparison_bits),
+                    lhs_ct, EncodeInteger<P_in>(values[static_cast<std::size_t>(i)], comparison_bits),
                     P_in::α, sk_.key.get<P_in>());
-                signs[i] = Chapter3HomCompare<
+                signs[static_cast<std::size_t>(i)] = Chapter3HomCompare<
                     brP_meta, brP_logari, brP_base, iksP_t>(
                         lhs_ct, rhs_ct, comparison_bits, predicate,
                         *bk_meta_, trkeys_, cfg_, *bk_logari_, *bk_base_,
                         *iksk_, hom_options_, nullptr);
-                const int got = DecodeComparisonBit(signs[i], sk_);
-                const int expected = ExpectedPredicate(values[i], constant, predicate);
+                const int got = DecodeComparisonBit(signs[static_cast<std::size_t>(i)], sk_);
+                const int expected = ExpectedPredicate(
+                    values[static_cast<std::size_t>(i)], constant, predicate);
                 if (got != expected) local_errors++;
             }
             for (std::size_t i = values.size(); i < runtime_.slots; i++) {

@@ -1,4 +1,5 @@
 find_package(OpenFHE CONFIG REQUIRED)
+find_package(OpenMP)
 
 add_library(paper_native_baselines native_baseline_experiments.cpp)
 target_include_directories(paper_native_baselines PUBLIC
@@ -7,6 +8,9 @@ target_include_directories(paper_native_baselines PUBLIC
 )
 target_link_libraries(paper_native_baselines PUBLIC tfhe++)
 target_compile_features(paper_native_baselines PUBLIC cxx_std_20)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(paper_native_baselines PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 add_library(paper_algorithms algorithms.cpp tpch_experiments.cpp chap3_compare_experiment.cpp)
 target_include_directories(paper_algorithms PUBLIC
@@ -23,6 +27,9 @@ target_include_directories(paper_algorithms SYSTEM PUBLIC
 target_link_directories(paper_algorithms PUBLIC ${OpenFHE_LIBDIR})
 target_link_libraries(paper_algorithms PUBLIC tfhe++ ${OpenFHE_SHARED_LIBRARIES})
 target_compile_features(paper_algorithms PUBLIC cxx_std_20)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(paper_algorithms PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 if(UNIX AND NOT APPLE)
     target_link_options(paper_algorithms PUBLIC -Wl,--no-as-needed)

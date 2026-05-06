@@ -68,12 +68,14 @@ std::vector<int> HE3DBEqualMasks(
     HE3DBNative::TFHEEvalKey& ek) {
     std::vector<int> masks(values.size(), 0);
     auto target_ct = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(target, bits, sk);
-    for (std::size_t i = 0; i < values.size(); i++) {
-        auto lhs = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(values[i], bits, sk);
+    #pragma omp parallel for schedule(dynamic)
+    for (std::int64_t i = 0; i < static_cast<std::int64_t>(values.size()); i++) {
+        const auto idx = static_cast<std::size_t>(i);
+        auto lhs = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(values[idx], bits, sk);
         HE3DBNative::TLWELvl1 res;
         HE3DBNative::equal<HE3DBNative::Lvl1>(
             lhs, target_ct, res, bits, ek, HE3DBNative::LOGIC);
-        masks[i] = HE3DBNative::DecryptLogic(res, sk);
+        masks[idx] = HE3DBNative::DecryptLogic(res, sk);
     }
     return masks;
 }
@@ -88,13 +90,15 @@ std::vector<int> ArcEDBEqualMasks(
     std::vector<ArcEDBNative::TRGSWLvl1> target_ct;
     ArcEDBNative::exponent_encrypt_rgsw<ArcEDBNative::Lvl1>(
         target, bits, target_ct, sk, true);
-    for (std::size_t i = 0; i < values.size(); i++) {
+    #pragma omp parallel for schedule(dynamic)
+    for (std::int64_t i = 0; i < static_cast<std::int64_t>(values.size()); i++) {
+        const auto idx = static_cast<std::size_t>(i);
         std::vector<ArcEDBNative::TRLWELvl1> lhs;
         ArcEDBNative::exponent_encrypt<ArcEDBNative::Lvl1>(
-            values[i], bits, lhs, sk);
+            values[idx], bits, lhs, sk);
         ArcEDBNative::TLWELvl1 res;
         ArcEDBNative::equality_tfhepp(lhs, target_ct, target_ct.size(), res, ek, sk);
-        masks[i] = ArcEDBNative::DecryptLogic(res, sk);
+        masks[idx] = ArcEDBNative::DecryptLogic(res, sk);
     }
     return masks;
 }
@@ -107,12 +111,14 @@ std::vector<int> HE3DBLessMasks(
     HE3DBNative::TFHEEvalKey& ek) {
     std::vector<int> masks(values.size(), 0);
     auto target_ct = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(target, bits, sk);
-    for (std::size_t i = 0; i < values.size(); i++) {
-        auto lhs = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(values[i], bits, sk);
+    #pragma omp parallel for schedule(dynamic)
+    for (std::int64_t i = 0; i < static_cast<std::int64_t>(values.size()); i++) {
+        const auto idx = static_cast<std::size_t>(i);
+        auto lhs = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(values[idx], bits, sk);
         HE3DBNative::TLWELvl1 res;
         HE3DBNative::less_than<HE3DBNative::Lvl1>(
             lhs, target_ct, res, bits, ek, HE3DBNative::LOGIC);
-        masks[i] = HE3DBNative::DecryptLogic(res, sk);
+        masks[idx] = HE3DBNative::DecryptLogic(res, sk);
     }
     return masks;
 }
@@ -125,12 +131,14 @@ std::vector<int> HE3DBGreaterMasks(
     HE3DBNative::TFHEEvalKey& ek) {
     std::vector<int> masks(values.size(), 0);
     auto target_ct = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(target, bits, sk);
-    for (std::size_t i = 0; i < values.size(); i++) {
-        auto lhs = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(values[i], bits, sk);
+    #pragma omp parallel for schedule(dynamic)
+    for (std::int64_t i = 0; i < static_cast<std::int64_t>(values.size()); i++) {
+        const auto idx = static_cast<std::size_t>(i);
+        auto lhs = HE3DBNative::EncryptInt<HE3DBNative::Lvl1>(values[idx], bits, sk);
         HE3DBNative::TLWELvl1 res;
         HE3DBNative::less_than<HE3DBNative::Lvl1>(
             target_ct, lhs, res, bits, ek, HE3DBNative::LOGIC);
-        masks[i] = HE3DBNative::DecryptLogic(res, sk);
+        masks[idx] = HE3DBNative::DecryptLogic(res, sk);
     }
     return masks;
 }
@@ -145,13 +153,15 @@ std::vector<int> ArcEDBLessMasks(
     std::vector<ArcEDBNative::TRGSWLvl1> target_ct;
     ArcEDBNative::exponent_encrypt_rgsw<ArcEDBNative::Lvl1>(
         target, bits, target_ct, sk, true);
-    for (std::size_t i = 0; i < values.size(); i++) {
+    #pragma omp parallel for schedule(dynamic)
+    for (std::int64_t i = 0; i < static_cast<std::int64_t>(values.size()); i++) {
+        const auto idx = static_cast<std::size_t>(i);
         std::vector<ArcEDBNative::TRLWELvl1> lhs;
         ArcEDBNative::exponent_encrypt<ArcEDBNative::Lvl1>(
-            values[i], bits, lhs, sk);
+            values[idx], bits, lhs, sk);
         ArcEDBNative::TLWELvl1 res;
         ArcEDBNative::less_than_tfhepp(lhs, target_ct, target_ct.size(), res, ek, sk);
-        masks[i] = ArcEDBNative::DecryptLogic(res, sk);
+        masks[idx] = ArcEDBNative::DecryptLogic(res, sk);
     }
     return masks;
 }
@@ -166,13 +176,15 @@ std::vector<int> ArcEDBGreaterMasks(
     std::vector<ArcEDBNative::TRGSWLvl1> target_ct;
     ArcEDBNative::exponent_encrypt_rgsw<ArcEDBNative::Lvl1>(
         target, bits, target_ct, sk, true);
-    for (std::size_t i = 0; i < values.size(); i++) {
+    #pragma omp parallel for schedule(dynamic)
+    for (std::int64_t i = 0; i < static_cast<std::int64_t>(values.size()); i++) {
+        const auto idx = static_cast<std::size_t>(i);
         std::vector<ArcEDBNative::TRLWELvl1> lhs;
         ArcEDBNative::exponent_encrypt<ArcEDBNative::Lvl1>(
-            values[i], bits, lhs, sk);
+            values[idx], bits, lhs, sk);
         ArcEDBNative::TLWELvl1 res;
         ArcEDBNative::greater_than_tfhepp(lhs, target_ct, target_ct.size(), res, ek, sk);
-        masks[i] = ArcEDBNative::DecryptLogic(res, sk);
+        masks[idx] = ArcEDBNative::DecryptLogic(res, sk);
     }
     return masks;
 }

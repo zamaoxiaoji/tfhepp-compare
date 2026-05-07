@@ -17,9 +17,13 @@
 // HE3DB's identity-bootstrap right-shift reduction path.
 // =============================================================
 
+#include <algorithm>
 #include <cstdint>
+#include <cmath>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -51,6 +55,7 @@ struct HomMSBOptions {
     bool enable_periodic_pruning = true;
     int period = 0;
     WeightedBitMode weighted_mode = WeightedBitMode::CheckedDirectThenLogical;
+    bool use_lightweight_gap_pbs = true;
 };
 
 template <typename T>
@@ -58,6 +63,86 @@ struct PrecisionState {
     int p = 0;      // Current effective message precision.
     T delta = 0;    // Current server-side torus scale, Q / 2^p.
     int round = 0;  // Recursive/MetaPBS round that produced this state.
+};
+
+struct ResidualInterval {
+    double lo = 0.0;
+    double hi = 0.0;
+};
+
+template <typename T>
+struct RecursivePrecisionState {
+    int p = 0;
+    T delta = 0;
+    ResidualInterval rho{};
+    int round = 0;
+    std::string semantic;
+};
+
+template <typename T>
+struct GapRoundParams {
+    int round = 0;
+    int p_in = 0;
+    int p_out = 0;
+    int s = 0;
+    int k = 0;
+    std::uint64_t w = 0;
+    T delta_in = 0;
+    T delta_out = 0;
+    T A = 0;
+    T offset = 0;
+    ResidualInterval rho_in{};
+    ResidualInterval rho_out{};
+    double residual_margin = 0.0;
+};
+
+struct SimRoundState {
+    int round = 0;
+    int p_in = 0;
+    int p_out = 0;
+    int s = 0;
+    std::uint64_t q = 0;
+    std::uint64_t r = 0;
+    int bit = 0;
+    double rho_in = 0.0;
+    double rho_out = 0.0;
+};
+
+struct SimResult {
+    std::uint64_t m_original = 0;
+    int p_original = 0;
+    int p_out = 0;
+    std::uint64_t m_work = 0;
+    double rho_work = 0.0;
+    std::vector<SimRoundState> rounds;
+    bool msb_ok = false;
+    double min_rho = 0.0;
+    double max_rho = 0.0;
+    double min_final_margin_units = 0.0;
+    std::string schedule;
+};
+
+template <class P>
+struct RecursiveGapRoundOutput {
+    int round = 0;
+    int p_in = 0;
+    int p_out = 0;
+    int s = 0;
+    ResidualInterval rho_out{};
+    TFHEpp::TLWE<P> ct_out{};
+};
+
+template <class P>
+struct RecursiveGapReduceResult {
+    TFHEpp::TLWE<P> ct_out{};
+    int p_out = 0;
+    typename P::T delta_out = 0;
+    ResidualInterval rho_out{};
+    std::vector<GapRoundParams<typename P::T>> rounds;
+    std::vector<RecursiveGapRoundOutput<P>> round_outputs;
+    std::string path_kind;
+    std::string schedule;
+    std::string semantic;
 };
 
 template <typename T>
@@ -87,6 +172,22 @@ inline int DefaultGapBitForPrecision(int p) {
     if (k <= 0 || k >= p)
         throw std::invalid_argument("default GapMSB bit is outside current precision");
     return k;
+}
+
+inline std::string RecursiveGapScaleScheduleString(int p_original,
+                                                   int p_target = 12) {
+    if (p_original <= 0 || p_target <= 0)
+        throw std::invalid_argument("recursive schedule requires positive precisions");
+    std::ostringstream os;
+    os << p_original;
+    int p = p_original;
+    while (p > p_target) {
+        const int s = std::min(5, p - p_target);
+        p -= s;
+        os << "->" << p;
+    }
+    if (p_original < p_target) os << "->zeroextend" << p_target;
+    return os.str();
 }
 
 template <typename T>
@@ -122,6 +223,164 @@ inline T ArithmeticWeightForChapterBit(int p, int k) {
     const unsigned __int128 delta = TorusScaleForPrecision<T>(p);
     const unsigned __int128 w = static_cast<unsigned __int128>(1) << lsb_k;
     return static_cast<T>(w * delta);
+}
+
+template <typename T>
+inline T GapScaleWindowWeight(int p_cur, int s) {
+    static_assert(std::is_unsigned_v<T>, "GapScaleWindowWeight expects unsigned torus");
+    if (s <= 0 || s > 5 || p_cur <= s)
+        throw std::invalid_argument("invalid GapScale window");
+    const unsigned __int128 delta = TorusScaleForPrecision<T>(p_cur);
+    const unsigned __int128 w = static_cast<unsigned __int128>(1) << (s - 1);
+    return static_cast<T>(w * delta);
+}
+
+template <typename T>
+inline T GapScaleWindowOffset(int p_cur, int s) {
+    static_assert(std::is_unsigned_v<T>, "GapScaleWindowOffset expects unsigned torus");
+    if (s <= 0 || s > 5 || p_cur <= s)
+        throw std::invalid_argument("invalid GapScale window");
+    const unsigned __int128 delta = TorusScaleForPrecision<T>(p_cur);
+    const unsigned __int128 w = static_cast<unsigned __int128>(1) << (s - 1);
+    return static_cast<T>(((w + 1) * delta + 1) >> 1);
+}
+
+inline ResidualInterval UpdateGapScaleResidual(ResidualInterval rho_in,
+                                               int s) {
+    if (s <= 0 || s > 5)
+        throw std::invalid_argument("invalid residual update window");
+    const double denom = static_cast<double>(std::uint64_t{1} << s);
+    const double w = static_cast<double>(std::uint64_t{1} << (s - 1));
+    ResidualInterval out{
+        .lo = (rho_in.lo + (w + 1.0) / 2.0) / denom,
+        .hi = ((w - 1.0) + rho_in.hi + (w + 1.0) / 2.0) / denom,
+    };
+    if (out.lo < 0.0 || !(out.hi < 1.0))
+        throw std::logic_error("GapScale residual interval escaped [0,1)");
+    return out;
+}
+
+template <typename T>
+inline GapRoundParams<T> MakeGapScaleRoundParams(
+    int round, int p_in, int s, ResidualInterval rho_in) {
+    static_assert(std::is_unsigned_v<T>, "MakeGapScaleRoundParams expects unsigned torus");
+    if (p_in <= 1 || s <= 0 || s > 5 || p_in <= s)
+        throw std::invalid_argument("invalid GapScale round precision");
+    const int p_out = p_in - s;
+    const auto rho_out = UpdateGapScaleResidual(rho_in, s);
+    const auto w = std::uint64_t{1} << (s - 1);
+    return GapRoundParams<T>{
+        .round = round,
+        .p_in = p_in,
+        .p_out = p_out,
+        .s = s,
+        .k = p_in - s,
+        .w = w,
+        .delta_in = TorusScaleForPrecision<T>(p_in),
+        .delta_out = TorusScaleForPrecision<T>(p_out),
+        .A = GapScaleWindowWeight<T>(p_in, s),
+        .offset = GapScaleWindowOffset<T>(p_in, s),
+        .rho_in = rho_in,
+        .rho_out = rho_out,
+        .residual_margin = std::min(rho_out.lo, 1.0 - rho_out.hi),
+    };
+}
+
+inline double FinalGapEffectiveMarginUnits(int p_work, int k,
+                                           ResidualInterval rho) {
+    const int lsb_k = LSBIndexFromChapterBit(p_work, k);
+    const auto w = static_cast<double>(std::uint64_t{1} << lsb_k);
+    const double offset_units = (w + 1.0 - rho.lo - rho.hi) / 2.0;
+    return std::min(offset_units + rho.lo,
+                    (w + 1.0) - offset_units - rho.hi);
+}
+
+inline double FinalGapOffsetUnits(int p_work, int k, ResidualInterval rho) {
+    const int lsb_k = LSBIndexFromChapterBit(p_work, k);
+    const auto w = static_cast<double>(std::uint64_t{1} << lsb_k);
+    return (w + 1.0 - rho.lo - rho.hi) / 2.0;
+}
+
+template <typename T>
+inline T FinalGapOffsetForResidual(int p_work, int k, ResidualInterval rho) {
+    static_assert(std::is_unsigned_v<T>,
+                  "FinalGapOffsetForResidual expects unsigned torus");
+    const long double units =
+        static_cast<long double>(FinalGapOffsetUnits(p_work, k, rho));
+    if (!(units > 0.0L))
+        throw std::logic_error("recursive residual leaves invalid final offset");
+    const long double delta =
+        static_cast<long double>(TorusScaleForPrecision<T>(p_work));
+    return static_cast<T>(std::llround(units * delta));
+}
+
+inline SimResult SimulateRecursiveGapReduce(
+    std::uint64_t m_original, int p_original, int p_target = 12,
+    int k_final = 7) {
+    if (p_original <= 0 || p_original > 63)
+        throw std::invalid_argument("simulator precision must be in [1,63]");
+    if (p_target <= 0 || p_target > 63)
+        throw std::invalid_argument("simulator target precision must be in [1,63]");
+    if (p_original < 64 && m_original >= (std::uint64_t{1} << p_original))
+        throw std::invalid_argument("simulator message outside precision domain");
+
+    SimResult result{};
+    result.m_original = m_original;
+    result.p_original = p_original;
+    result.schedule = RecursiveGapScaleScheduleString(p_original, p_target);
+    std::uint64_t m = m_original;
+    double rho = 0.0;
+    int p_cur = p_original;
+    int round = 0;
+    while (p_cur > p_target) {
+        const int s = std::min(5, p_cur - p_target);
+        const std::uint64_t mask = (std::uint64_t{1} << s) - 1;
+        const std::uint64_t w = std::uint64_t{1} << (s - 1);
+        const std::uint64_t q = m >> s;
+        const std::uint64_t r = m & mask;
+        const int bit = r >= w ? 1 : 0;
+        const std::uint64_t r_clear = r - (bit ? w : 0);
+        const double rho_next =
+            (static_cast<double>(r_clear) + rho +
+             (static_cast<double>(w) + 1.0) / 2.0) /
+            static_cast<double>(std::uint64_t{1} << s);
+        if (rho_next < 0.0 || !(rho_next < 1.0))
+            throw std::logic_error("simulated residual escaped [0,1)");
+        result.rounds.push_back(SimRoundState{
+            .round = round,
+            .p_in = p_cur,
+            .p_out = p_cur - s,
+            .s = s,
+            .q = q,
+            .r = r,
+            .bit = bit,
+            .rho_in = rho,
+            .rho_out = rho_next,
+        });
+        m = q;
+        rho = rho_next;
+        p_cur -= s;
+        round++;
+    }
+    if (p_cur < p_target) {
+        m <<= (p_target - p_cur);
+        p_cur = p_target;
+    }
+    result.p_out = p_cur;
+    result.m_work = m;
+    result.rho_work = rho;
+    result.min_rho = rho;
+    result.max_rho = rho;
+    result.min_final_margin_units =
+        FinalGapEffectiveMarginUnits(p_target, k_final,
+                                     ResidualInterval{.lo = rho, .hi = rho});
+    const bool original_msb =
+        ((m_original >> (p_original - 1)) & std::uint64_t{1}) != 0;
+    const bool reduced_msb =
+        static_cast<long double>(m) + static_cast<long double>(rho) >=
+        std::ldexp(1.0L, p_target - 1);
+    result.msb_ok = original_msb == reduced_msb;
+    return result;
 }
 
 template <typename T>
@@ -416,6 +675,24 @@ NaiveSignPBS_Lvl01(
 }
 
 template <class iksP, class brP_base>
+inline void RecordLvl2ToLvl0GatePBSStats(
+    BlindRotatePruneStats* stats,
+    int target_period = 0) {
+    if (!stats) return;
+    using midP = typename iksP::targetP;
+    using outP = typename brP_base::targetP;
+    stats->pbs_calls++;
+    stats->pbs_count_gapmsb++;
+    stats->key_switch_count++;
+    stats->total += midP::k * midP::n;
+    stats->cmux_calls += midP::k * midP::n;
+    stats->periods.push_back(target_period > 0 ? target_period : 2 * outP::n);
+    stats->total_by_pbs.push_back(midP::k * midP::n);
+    stats->cmux_by_pbs.push_back(midP::k * midP::n);
+    stats->skipped_by_pbs.push_back(0);
+}
+
+template <class iksP, class brP_base>
 TFHEpp::TLWE<typename brP_base::targetP>
 NaiveSignPBS_Lvl01(
     const TFHEpp::TLWE<typename iksP::domainP>& ct,
@@ -432,6 +709,158 @@ NaiveSignPBS_Lvl01(
         ct, offset, iksk, bkfft_base);
 }
 
+template <class iksP, class brP_logari>
+TFHEpp::TLWE<typename brP_logari::targetP>
+NaiveSignPBS_Lvl02(
+    const TFHEpp::TLWE<typename iksP::domainP>& ct,
+    typename iksP::domainP::T offset,
+    const TFHEpp::KeySwitchingKey<iksP>& iksk,
+    const TFHEpp::BootstrappingKeyFFT<brP_logari>& bkfft_logari) {
+    using inP = typename iksP::domainP;
+    using midP = typename iksP::targetP;
+    using outP = typename brP_logari::targetP;
+    static_assert(std::is_same_v<midP, typename brP_logari::domainP>,
+                  "IKS target must match lvl0->lvl2 sign BK domain");
+    static_assert(std::is_same_v<inP, outP>,
+                  "lvl0->lvl2 sign PBS currently returns to the input lvl2 key");
+
+    TFHEpp::TLWE<inP> shifted = ct;
+    shifted[inP::k * inP::n] += offset;
+
+    TFHEpp::TLWE<midP> tlwe_mid{};
+    TFHEpp::IdentityKeySwitch<iksP>(tlwe_mid, shifted, iksk);
+
+    TFHEpp::Polynomial<outP> tv{};
+    tv.fill(static_cast<typename outP::T>(outP::μ));
+
+    TFHEpp::TLWE<outP> out{};
+    TFHEpp::GateBootstrappingTLWE2TLWE<brP_logari>(
+        out, tlwe_mid, bkfft_logari, tv);
+    return out;
+}
+
+// HE3DB-style lightweight bit extraction for the native GapMSB window.
+//
+// A ciphertext Enc_{Q/2^p}(m) is multiplied by 2^{p-(ell+1)} so that the
+// requested LSB-side bit ell becomes the sign bit of the current window.  The
+// following lvl2->lvl0 IKS + lvl0->lvl2 gate bootstrap outputs BoolHalf
+// arithmetic encoding 0/Q/2.  This preserves the Chapter-3 clear-one-bit
+// semantics while avoiding a full lvl2 MetaPBS bit-extraction round.
+template <class iksP, class brP_logari>
+TFHEpp::TLWE<typename brP_logari::targetP>
+BitExtractBoolHalf_Lvl02(
+    const TFHEpp::TLWE<typename iksP::domainP>& ct,
+    int encoding_p,
+    int chapter_bit,
+    const TFHEpp::KeySwitchingKey<iksP>& iksk,
+    const TFHEpp::BootstrappingKeyFFT<brP_logari>& bkfft_logari,
+    BlindRotatePruneStats* stats = nullptr) {
+    using inP = typename iksP::domainP;
+    using midP = typename iksP::targetP;
+    using outP = typename brP_logari::targetP;
+    static_assert(std::is_same_v<midP, typename brP_logari::domainP>,
+                  "IKS target must match lightweight bit-extract BK domain");
+    static_assert(std::is_same_v<inP, outP>,
+                  "lightweight bit extract currently returns to the input lvl2 key");
+
+    if (encoding_p <= 1)
+        throw std::invalid_argument("BitExtractBoolHalf_Lvl02 requires p >= 2");
+    if (chapter_bit <= 0 || chapter_bit >= encoding_p)
+        throw std::invalid_argument("BitExtractBoolHalf_Lvl02 requires 1 <= k < p");
+
+    const int lsb_k = LSBIndexFromChapterBit(encoding_p, chapter_bit);
+    const int window_p = lsb_k + 1;
+    const int shift_bits = encoding_p - window_p;
+    constexpr int digits = std::numeric_limits<typename inP::T>::digits;
+    if (shift_bits < 0 || shift_bits >= digits)
+        throw std::invalid_argument("BitExtractBoolHalf_Lvl02 shift is out of range");
+
+    TFHEpp::TLWE<inP> shifted{};
+    for (std::size_t i = 0; i < ct.size(); i++)
+        shifted[i] = static_cast<typename inP::T>(ct[i] << shift_bits);
+    shifted[inP::k * inP::n] +=
+        StandardMSBOffsetForPrecision<typename inP::T>(window_p);
+
+    TFHEpp::TLWE<midP> tlwe_mid{};
+    TFHEpp::IdentityKeySwitch<iksP>(tlwe_mid, shifted, iksk);
+
+    const auto half_bool = static_cast<typename outP::T>(outP::μ << 1);
+    TFHEpp::Polynomial<outP> tv{};
+    tv.fill(typename outP::T(0) - half_bool);
+
+    if (stats) {
+        RecordLvl2ToLvl0GatePBSStats<iksP, brP_logari>(stats, 2 * outP::n);
+        stats->pbs_count_bit_extract++;
+    }
+
+    TFHEpp::TLWE<outP> out{};
+    TFHEpp::GateBootstrappingTLWE2TLWE<brP_logari>(
+        out, tlwe_mid, bkfft_logari, tv);
+    out[outP::k * outP::n] += half_bool;
+    return out;
+}
+
+template <class iksP, class brP_logari>
+TFHEpp::TLWE<typename brP_logari::targetP>
+ExtractWeightedChapterBitCentered_Lvl02(
+    const TFHEpp::TLWE<typename iksP::domainP>& ct,
+    int encoding_p,
+    int chapter_bit,
+    typename brP_logari::targetP::T weight_torus,
+    const TFHEpp::KeySwitchingKey<iksP>& iksk,
+    const TFHEpp::BootstrappingKeyFFT<brP_logari>& bkfft_logari,
+    BlindRotatePruneStats* stats = nullptr) {
+    using inP = typename iksP::domainP;
+    using midP = typename iksP::targetP;
+    using outP = typename brP_logari::targetP;
+    static_assert(std::is_same_v<midP, typename brP_logari::domainP>,
+                  "IKS target must match centered weighted-bit BK domain");
+    static_assert(std::is_same_v<inP, outP>,
+                  "centered weighted-bit extraction currently returns to lvl2");
+
+    if ((weight_torus & typename outP::T(1)) != 0)
+        throw std::invalid_argument(
+            "centered weighted-bit extraction requires an even torus weight");
+    const auto half_w = static_cast<typename outP::T>(weight_torus >> 1);
+    if (half_w == 0)
+        throw std::invalid_argument("centered weighted-bit extraction requires nonzero weight");
+
+    if (encoding_p <= 1)
+        throw std::invalid_argument("ExtractWeightedChapterBitCentered_Lvl02 requires p >= 2");
+    if (chapter_bit <= 0 || chapter_bit >= encoding_p)
+        throw std::invalid_argument("ExtractWeightedChapterBitCentered_Lvl02 requires 1 <= k < p");
+
+    const int lsb_k = LSBIndexFromChapterBit(encoding_p, chapter_bit);
+    const int window_p = lsb_k + 1;
+    const int shift_bits = encoding_p - window_p;
+    constexpr int digits = std::numeric_limits<typename inP::T>::digits;
+    if (shift_bits < 0 || shift_bits >= digits)
+        throw std::invalid_argument("ExtractWeightedChapterBitCentered_Lvl02 shift is out of range");
+
+    TFHEpp::TLWE<inP> shifted{};
+    for (std::size_t i = 0; i < ct.size(); i++)
+        shifted[i] = static_cast<typename inP::T>(ct[i] << shift_bits);
+    shifted[inP::k * inP::n] +=
+        StandardMSBOffsetForPrecision<typename inP::T>(window_p);
+
+    TFHEpp::TLWE<midP> tlwe_mid{};
+    TFHEpp::IdentityKeySwitch<iksP>(tlwe_mid, shifted, iksk);
+
+    TFHEpp::Polynomial<outP> tv{};
+    tv.fill(typename outP::T(0) - half_w);
+
+    if (stats) {
+        RecordLvl2ToLvl0GatePBSStats<iksP, brP_logari>(stats, 2 * outP::n);
+        stats->pbs_count_bit_extract++;
+    }
+
+    TFHEpp::TLWE<outP> out{};
+    TFHEpp::GateBootstrappingTLWE2TLWE<brP_logari>(
+        out, tlwe_mid, bkfft_logari, tv);
+    out[outP::k * outP::n] += half_w;
+    return out;
+}
+
 // =============================================================
 // BoolToWeightPBS_Lvl02: lightweight BoolHalf -> WeightedBit conversion.
 //
@@ -445,7 +874,8 @@ BoolToWeightPBS_Lvl02(
     typename brP_logari::targetP::T weight_torus,
     const TFHEpp::KeySwitchingKey<iksP>& iksk,
     const TFHEpp::BootstrappingKeyFFT<brP_logari>& bkfft_logari,
-    BlindRotatePruneStats* stats = nullptr) {
+    BlindRotatePruneStats* stats = nullptr,
+    bool recursive_round = false) {
     using inP = typename iksP::domainP;
     using midP = typename iksP::targetP;
     using outP = typename brP_logari::targetP;
@@ -470,6 +900,7 @@ BoolToWeightPBS_Lvl02(
         stats->pbs_calls++;
         stats->pbs_count_gapmsb++;
         stats->pbs_count_bool_to_weight++;
+        if (recursive_round) stats->pbs_count_recursive_bool_to_weight++;
         stats->key_switch_count++;
         stats->total += midP::k * midP::n;
         stats->cmux_calls += midP::k * midP::n;
@@ -484,6 +915,207 @@ BoolToWeightPBS_Lvl02(
     TFHEpp::GateBootstrappingTLWE2TLWE<brP_logari>(out, tlwe_mid, bkfft_logari, tv);
     out[outP::k * outP::n] += half_w;
     return out;
+}
+
+// Extract b = 1 iff (m mod 2^s) + rho >= 2^(s-1) from a ciphertext whose
+// current phase is Enc_{Q/2^p_cur}(m + rho).  This is the recursive GapScale
+// low-window predicate; it never builds a p_cur-bit LUT.
+template <class iksP, class brP_logari>
+TFHEpp::TLWE<typename brP_logari::targetP>
+BitExtractLowWindowBoolPruned(
+    const TFHEpp::TLWE<typename iksP::domainP>& ct,
+    int p_cur,
+    int s,
+    const TFHEpp::KeySwitchingKey<iksP>& iksk,
+    const TFHEpp::BootstrappingKeyFFT<brP_logari>& bkfft_logari,
+    BlindRotatePruneStats* stats = nullptr) {
+    using inP = typename iksP::domainP;
+    using midP = typename iksP::targetP;
+    using outP = typename brP_logari::targetP;
+    static_assert(std::is_same_v<midP, typename brP_logari::domainP>,
+                  "IKS target must match low-window bit BK domain");
+    static_assert(std::is_same_v<inP, outP>,
+                  "low-window bit extraction must return to the input level");
+
+    constexpr int digits = std::numeric_limits<typename inP::T>::digits;
+    if (s <= 0 || s > 5 || p_cur <= s || p_cur >= digits)
+        throw std::invalid_argument("BitExtractLowWindowBoolPruned invalid precision/window");
+    const int shift_bits = p_cur - s;
+    if (shift_bits < 0 || shift_bits >= digits)
+        throw std::invalid_argument("BitExtractLowWindowBoolPruned shift out of range");
+
+    TFHEpp::TLWE<inP> window{};
+    for (std::size_t i = 0; i < ct.size(); i++)
+        window[i] = static_cast<typename inP::T>(ct[i] << shift_bits);
+    window[inP::k * inP::n] +=
+        StandardMSBOffsetForPrecision<typename inP::T>(s);
+
+    TFHEpp::TLWE<midP> tlwe_mid{};
+    TFHEpp::IdentityKeySwitch<iksP>(tlwe_mid, window, iksk);
+
+    const auto half_bool =
+        static_cast<typename outP::T>(static_cast<typename outP::T>(outP::μ) << 1);
+    TFHEpp::Polynomial<outP> tv{};
+    tv.fill(typename outP::T(0) - half_bool);
+
+    if (stats) {
+        RecordLvl2ToLvl0GatePBSStats<iksP, brP_logari>(stats, 2 * outP::n);
+        stats->pbs_count_bit_extract++;
+        stats->pbs_count_recursive_bit_extract++;
+    }
+
+    TFHEpp::TLWE<outP> out{};
+    TFHEpp::GateBootstrappingTLWE2TLWE<brP_logari>(
+        out, tlwe_mid, bkfft_logari, tv);
+    out[outP::k * outP::n] += half_bool;
+    return out;
+}
+
+template <class iksP, class brP_logari>
+TFHEpp::TLWE<typename brP_logari::targetP>
+ExtractWeightedLowWindowPBS_Lvl02(
+    const TFHEpp::TLWE<typename iksP::domainP>& ct,
+    int p_cur,
+    int s,
+    typename brP_logari::targetP::T weight_torus,
+    const TFHEpp::KeySwitchingKey<iksP>& iksk,
+    const TFHEpp::BootstrappingKeyFFT<brP_logari>& bkfft_logari,
+    BlindRotatePruneStats* stats = nullptr) {
+    using inP = typename iksP::domainP;
+    using midP = typename iksP::targetP;
+    using outP = typename brP_logari::targetP;
+    static_assert(std::is_same_v<midP, typename brP_logari::domainP>,
+                  "IKS target must match weighted low-window BK domain");
+    static_assert(std::is_same_v<inP, outP>,
+                  "weighted low-window extraction must return to the input level");
+
+    constexpr int digits = std::numeric_limits<typename inP::T>::digits;
+    if (s <= 0 || s > 6 || p_cur <= s || p_cur >= digits)
+        throw std::invalid_argument("ExtractWeightedLowWindowPBS_Lvl02 invalid precision/window");
+    if ((weight_torus & typename outP::T(1)) != 0)
+        throw std::invalid_argument("weighted low-window extraction requires even weight");
+    const auto half_w = static_cast<typename outP::T>(weight_torus >> 1);
+    if (half_w == 0)
+        throw std::invalid_argument("weighted low-window extraction requires nonzero weight");
+
+    const int shift_bits = p_cur - s;
+    TFHEpp::TLWE<inP> window{};
+    for (std::size_t i = 0; i < ct.size(); i++)
+        window[i] = static_cast<typename inP::T>(ct[i] << shift_bits);
+    window[inP::k * inP::n] +=
+        StandardMSBOffsetForPrecision<typename inP::T>(s);
+
+    TFHEpp::TLWE<midP> tlwe_mid{};
+    TFHEpp::IdentityKeySwitch<iksP>(tlwe_mid, window, iksk);
+
+    TFHEpp::Polynomial<outP> tv{};
+    tv.fill(typename outP::T(0) - half_w);
+
+    if (stats) {
+        RecordLvl2ToLvl0GatePBSStats<iksP, brP_logari>(stats, 2 * outP::n);
+        stats->pbs_count_bit_extract++;
+    }
+
+    TFHEpp::TLWE<outP> out{};
+    TFHEpp::GateBootstrappingTLWE2TLWE<brP_logari>(
+        out, tlwe_mid, bkfft_logari, tv);
+    out[outP::k * outP::n] += half_w;
+    return out;
+}
+
+template <class iksP, class brP_logari>
+TFHEpp::TLWE<typename brP_logari::targetP>
+GapScaleRound(
+    const TFHEpp::TLWE<typename iksP::domainP>& ct_cur,
+    const GapRoundParams<typename brP_logari::targetP::T>& params,
+    const TFHEpp::KeySwitchingKey<iksP>& iksk,
+    const TFHEpp::BootstrappingKeyFFT<brP_logari>& bkfft_logari,
+    BlindRotatePruneStats* stats = nullptr) {
+    using inP = typename iksP::domainP;
+    using outP = typename brP_logari::targetP;
+    static_assert(std::is_same_v<inP, outP>,
+                  "GapScaleRound currently keeps the ciphertext at lvl2");
+
+    const auto bit_ct = BitExtractLowWindowBoolPruned<iksP, brP_logari>(
+        ct_cur, params.p_in, params.s, iksk, bkfft_logari, stats);
+    const auto weight_ct = BoolToWeightPBS_Lvl02<iksP, brP_logari>(
+        bit_ct, params.A, iksk, bkfft_logari, stats, true);
+
+    TFHEpp::TLWE<outP> ct_next{};
+    for (std::size_t i = 0; i < ct_next.size(); i++)
+        ct_next[i] = ct_cur[i] - weight_ct[i];
+    ct_next[outP::k * outP::n] += params.offset;
+    return ct_next;
+}
+
+template <class iksP, class brP_logari>
+RecursiveGapReduceResult<typename brP_logari::targetP>
+RecursiveGapReduceToNative(
+    const TFHEpp::TLWE<typename iksP::domainP>& ct_in,
+    int p_original,
+    int p_native,
+    const TFHEpp::KeySwitchingKey<iksP>& iksk,
+    const TFHEpp::BootstrappingKeyFFT<brP_logari>& bkfft_logari,
+    BlindRotatePruneStats* stats = nullptr) {
+    using inP = typename iksP::domainP;
+    using outP = typename brP_logari::targetP;
+    static_assert(std::is_same_v<inP, outP>,
+                  "RecursiveGapReduceToNative must keep the lvl2 ciphertext key");
+    if (p_original <= 0 || p_native <= 0)
+        throw std::invalid_argument("RecursiveGapReduceToNative requires positive precisions");
+    if (p_original > 33)
+        throw std::invalid_argument("RecursiveGapReduceToNative supports p_original <= 33");
+
+    RecursiveGapReduceResult<outP> result{};
+    result.ct_out = ct_in;
+    result.schedule = RecursiveGapScaleScheduleString(p_original, p_native);
+    if (p_original < p_native) {
+        result.p_out = p_native;
+        result.delta_out = TorusScaleForPrecision<typename outP::T>(p_native);
+        result.rho_out = ResidualInterval{.lo = 0.0, .hi = 0.0};
+        result.path_kind = "ZeroExtendToNative";
+        result.semantic = "exact zero-extension, m_work=m_original<<(p_native-p_original)";
+        return result;
+    }
+    if (p_original == p_native) {
+        result.p_out = p_native;
+        result.delta_out = TorusScaleForPrecision<typename outP::T>(p_native);
+        result.rho_out = ResidualInterval{.lo = 0.0, .hi = 0.0};
+        result.path_kind = "NativeExact";
+        result.semantic = "exact native precision";
+        return result;
+    }
+
+    result.path_kind = "RecursiveGapScale";
+    ResidualInterval rho{.lo = 0.0, .hi = 0.0};
+    int p_cur = p_original;
+    int round = 0;
+    TFHEpp::TLWE<outP> current = ct_in;
+    while (p_cur > p_native) {
+        const int s = std::min(5, p_cur - p_native);
+        auto params = MakeGapScaleRoundParams<typename outP::T>(
+            round, p_cur, s, rho);
+        current = GapScaleRound<iksP, brP_logari>(
+            current, params, iksk, bkfft_logari, stats);
+        result.rounds.push_back(params);
+        result.round_outputs.push_back(RecursiveGapRoundOutput<outP>{
+            .round = round,
+            .p_in = params.p_in,
+            .p_out = params.p_out,
+            .s = params.s,
+            .rho_out = params.rho_out,
+            .ct_out = current,
+        });
+        rho = params.rho_out;
+        p_cur = params.p_out;
+        round++;
+    }
+    result.ct_out = current;
+    result.p_out = p_cur;
+    result.delta_out = TorusScaleForPrecision<typename outP::T>(p_cur);
+    result.rho_out = rho;
+    result.semantic = "Enc_{Delta_next}(q + rho_next), residual tracked";
+    return result;
 }
 
 template <class iksP, class brP_logari>
@@ -528,30 +1160,19 @@ ExtractWeightedChapterBitFast(
     const int p_metapbs = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
     if (chapter_bit <= 0 || chapter_bit >= p_metapbs)
         throw std::invalid_argument("HomMSB chapter bit is outside the MetaPBS window");
-    const int lsb_k = LSBIndexFromChapterBit(p_metapbs, chapter_bit);
+    const int s = LSBIndexFromChapterBit(p_metapbs, chapter_bit) + 1;
     const auto weight =
         ArithmeticWeightForChapterBit<typename tgtP::T>(encoding_p, chapter_bit);
-    const BitExtractOptions bit_options{
-        .p = p_metapbs,
-        .k = chapter_bit,
-        .enable_periodic_pruning = options.enable_periodic_pruning,
-        .period = options.period,
-    };
+    if (options.weighted_mode == WeightedBitMode::DirectOnly)
+        throw std::invalid_argument(
+            "DirectOnly weighted-bit extraction is disabled on the lightweight "
+            "GapMSB path; use BoolHalf extraction plus BoolToWeightPBS_Lvl02");
 
-    const bool direct_ok =
-        WeightedBitNegacyclicCompatible<typename tgtP::T>(lsb_k, tgtP::n, weight);
-    if (options.weighted_mode != WeightedBitMode::LogicalOnly) {
-        if (direct_ok)
-            return BitExtractWeighted<brP_metapbs>(
-                ct, bkfft, trkeys, cfg, bit_options, weight, prune_stats);
-        if (options.weighted_mode == WeightedBitMode::DirectOnly)
-            throw std::invalid_argument("direct weighted bit LUT violates negacyclic encoding");
-    }
-
-    auto bit_ct = BitExtractBoolPruned<brP_metapbs>(
-        ct, bkfft, trkeys, cfg, bit_options, prune_stats);
-    return BoolToWeightPBS_Lvl02<iksP, brP_logari>(
-        bit_ct, weight, iksk, bkfft_logari, prune_stats);
+    (void)bkfft;
+    (void)trkeys;
+    (void)cfg;
+    return ExtractWeightedLowWindowPBS_Lvl02<iksP, brP_logari>(
+        ct, p_metapbs, s, weight, iksk, bkfft_logari, prune_stats);
 }
 
 // =============================================================
@@ -661,55 +1282,74 @@ HomMSB(
     if (plain_bits <= 0)
         throw std::invalid_argument("HomMSB requires positive plaintext precision");
 
-    const int p_native = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
-    TFHEpp::TLWE<inP> ct_work = ct;
-    bool invert_after_gap = false;
-    if (plain_bits > p_native) {
-        // Move the signed MSB boundary away from the torus wrap before the
-        // HE3DB-style precision reducer.  The final GapMSB computes the MSB of
-        // this shifted value at p_native, then the lvl1 Boolean is inverted to
-        // recover the original signed MSB.
-        ct_work[inP::k * inP::n] +=
-            static_cast<typename inP::T>(
-                typename inP::T(1)
-                << (std::numeric_limits<typename inP::T>::digits - 1));
-        auto reduced = HE3DBStylePrecisionReduceToNative<iksP, brP_logari>(
-            ct_work, plain_bits, p_native, iksk, bkfft_logari, prune_stats);
-        ct_work = reduced.ct_out;
-        invert_after_gap = true;
+    if (plain_bits <= options.kappa) {
+        if (prune_stats) {
+            RecordLvl2ToLvl0GatePBSStats<iksP, brP_base>(prune_stats);
+            prune_stats->pbs_count_final_msb++;
+        }
+        const auto offset = StandardMSBOffsetForPrecision<typename inP::T>(plain_bits);
+        return NaiveSignPBS_Lvl01<iksP, brP_base>(
+            ct, offset, iksk, bkfft_base);
     }
 
-    // For plain_bits < p_native, and for reducer outputs with p_final <
-    // p_native, the physical torus phase is unchanged:
-    // m * Q/2^p == (m << (p_native - p)) * Q/2^p_native.
-    // This is legal zero-extension. The final Chapter-3 GapMSB is always
-    // defined at the native/current precision, not at the original precision.
+    const int p_native = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
+    TFHEpp::TLWE<inP> ct_work = ct;
+    ResidualInterval rho_work{.lo = 0.0, .hi = 0.0};
+    if (plain_bits > p_native) {
+        auto reduced = RecursiveGapReduceToNative<iksP, brP_logari>(
+            ct_work, plain_bits, p_native, iksk, bkfft_logari, prune_stats);
+        ct_work = reduced.ct_out;
+        rho_work = reduced.rho_out;
+    }
+
+    // For plain_bits < p_native the physical torus phase is unchanged:
+    // m * Q/2^p == (m << (p_native - p)) * Q/2^p_native.  For high precision
+    // inputs, RecursiveGapReduceToNative has already changed the ciphertext
+    // phase by ct_next = ct_cur - bit_weight + offset in every round and left a
+    // tracked residual rho_work in [0,1).  The final Chapter-3 GapMSB is always
+    // defined at the native/current precision.
     const int p_work = p_native;
     const int chapter_bit = p_work - options.kappa;
     if (chapter_bit <= 0 || chapter_bit >= p_work)
         throw std::invalid_argument("HomMSBOptions.kappa selects an invalid native GapMSB bit");
-    GapMSBOptions gap_options{
-        .p = p_work,
-        .k = chapter_bit,
-        .kappa = options.kappa,
-        .enable_periodic_pruning = options.enable_periodic_pruning,
-        .period = options.period,
-        .weighted_mode = options.weighted_mode,
-    };
-    auto lvl2_sign = GapMSB<brP_metapbs>(
-        ct_work, bkfft, trkeys, cfg, gap_options, prune_stats);
+    if (FinalGapEffectiveMarginUnits(p_work, chapter_bit, rho_work) <= 0.0)
+        throw std::logic_error("recursive residual leaves no final GapMSB margin");
+    TFHEpp::TLWE<typename brP_base::targetP> out{};
+    if (options.use_lightweight_gap_pbs) {
+        auto weighted_bit = ExtractWeightedChapterBitFast<
+            brP_metapbs, iksP, brP_logari>(
+                ct_work, p_work, chapter_bit, bkfft, trkeys, cfg, iksk,
+                bkfft_logari, options, prune_stats);
 
-    // GapMSB already performed the aligned sign decision and returns a lvl2 sign
-    // ciphertext. This final base PBS is only a key/level-compatible refresh to
-    // the public HomMSB lvl1 output type; no extra arithmetic offset is applied.
-    auto out = NaiveSignPBS_Lvl01<iksP, brP_base>(
-        lvl2_sign, typename inP::T(0), iksk, bkfft_base);
-    if (invert_after_gap) {
-        using outP = typename brP_base::targetP;
-        out[outP::k * outP::n] +=
-            static_cast<typename outP::T>(
-                typename outP::T(1)
-                << (std::numeric_limits<typename outP::T>::digits - 1));
+        TFHEpp::TLWE<inP> ct_gap{};
+        ClearChapterBitAssign<brP_metapbs>(ct_gap, ct_work, weighted_bit);
+
+        if (prune_stats) {
+            RecordLvl2ToLvl0GatePBSStats<iksP, brP_base>(prune_stats);
+            prune_stats->pbs_count_final_msb++;
+        }
+        out = NaiveSignPBS_Lvl01<iksP, brP_base>(
+            ct_gap,
+            FinalGapOffsetForResidual<typename inP::T>(
+                p_work, chapter_bit, rho_work),
+            iksk, bkfft_base);
+    } else {
+        GapMSBOptions gap_options{
+            .p = p_work,
+            .k = chapter_bit,
+            .kappa = options.kappa,
+            .enable_periodic_pruning = options.enable_periodic_pruning,
+            .period = options.period,
+            .weighted_mode = options.weighted_mode,
+        };
+        auto lvl2_sign = GapMSB<brP_metapbs>(
+            ct_work, bkfft, trkeys, cfg, gap_options, prune_stats);
+
+        // GapMSB already performed the aligned sign decision and returns a lvl2
+        // sign ciphertext. This base PBS is only a key/level-compatible refresh
+        // to the public HomMSB lvl1 output type.
+        out = NaiveSignPBS_Lvl01<iksP, brP_base>(
+            lvl2_sign, typename inP::T(0), iksk, bkfft_base);
     }
     return out;
 }

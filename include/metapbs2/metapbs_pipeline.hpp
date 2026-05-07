@@ -91,6 +91,8 @@ struct BlindRotatePruneStats {
     std::uint64_t pbs_count_bit_extract = 0;
     std::uint64_t pbs_count_bool_to_weight = 0;
     std::uint64_t pbs_count_final_msb = 0;
+    std::uint64_t pbs_count_recursive_bit_extract = 0;
+    std::uint64_t pbs_count_recursive_bool_to_weight = 0;
     std::vector<int> periods;   // Exact slot-domain periods used by each LUT.
     std::vector<std::uint64_t> total_by_pbs;
     std::vector<std::uint64_t> cmux_by_pbs;

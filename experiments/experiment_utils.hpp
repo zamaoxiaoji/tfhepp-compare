@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -111,11 +112,7 @@ inline std::string PrecisionPathKind(int L,
     const int p_native = NativePrecision(cfg);
     if (p_original < p_native) return "ZeroExtendToNative";
     if (p_original == p_native) return "NativeExact";
-    const auto schedule =
-        MetaPBS2::MakeHE3DBStylePrecisionSchedule(p_original, p_native);
-    return schedule.p_final < p_native
-               ? "HE3DBStylePrecisionReducePlusZeroExtend"
-               : "HE3DBStylePrecisionReduce";
+    return "RecursiveGapScale";
 }
 
 inline std::string PrecisionScheduleString(
@@ -126,9 +123,7 @@ inline std::string PrecisionScheduleString(
         return p_original < p_native
                    ? std::to_string(p_original) + "->zeroextend" + std::to_string(p_native)
                    : std::to_string(p_original);
-    const auto schedule =
-        MetaPBS2::MakeHE3DBStylePrecisionSchedule(p_original, p_native);
-    return MetaPBS2::ScheduleString(schedule, p_native);
+    return MetaPBS2::RecursiveGapScaleScheduleString(p_original, p_native);
 }
 
 inline std::vector<std::string> ParseOps(const std::string& text) {
@@ -197,6 +192,8 @@ struct GapMSBCounters {
     std::uint64_t pbs_count_bit_extract = 0;
     std::uint64_t pbs_count_bool_to_weight = 0;
     std::uint64_t pbs_count_final_msb = 0;
+    std::uint64_t pbs_count_recursive_bit_extract = 0;
+    std::uint64_t pbs_count_recursive_bool_to_weight = 0;
     std::uint64_t total_cmux = 0;
     std::uint64_t skipped_cmux = 0;
     std::uint64_t first_round_total_cmux = 0;
@@ -213,6 +210,8 @@ inline GapMSBCounters ToCounters(const MetaPBS2::BlindRotatePruneStats& stats) {
     c.pbs_count_bit_extract = stats.pbs_count_bit_extract;
     c.pbs_count_bool_to_weight = stats.pbs_count_bool_to_weight;
     c.pbs_count_final_msb = stats.pbs_count_final_msb;
+    c.pbs_count_recursive_bit_extract = stats.pbs_count_recursive_bit_extract;
+    c.pbs_count_recursive_bool_to_weight = stats.pbs_count_recursive_bool_to_weight;
     c.total_cmux = stats.total;
     c.skipped_cmux = stats.skipped;
     if (!stats.periods.empty()) c.first_round_slot_period = stats.periods.front();
@@ -281,6 +280,9 @@ inline bool RunOneRelation(
     const int p_work = WorkPrecisionForComparison(L, rt.cfg);
     options.kappa = std::max(1, p_work - k);
     options.enable_periodic_pruning = true;
+    const char* lightweight = std::getenv("OURS_LIGHTWEIGHT_GAP_PBS");
+    if (lightweight)
+        options.use_lightweight_gap_pbs = std::string(lightweight) != "0";
     const auto start = std::chrono::steady_clock::now();
     const auto out = PaperReview::Chapter3HomCompare<
         brP_meta, brP_logari, brP_base, iksP_t>(

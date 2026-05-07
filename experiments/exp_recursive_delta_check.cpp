@@ -40,6 +40,30 @@ void RecordFailure(std::vector<Failure>& failures, const Failure& f) {
     if (failures.size() < 50) failures.push_back(f);
 }
 
+TFHEpp::TLWE<PIn> FinalGapMSBResidualAware(
+    const TFHEpp::TLWE<PIn>& ct_work,
+    int p_work,
+    int k,
+    MetaPBS2::ResidualInterval rho_work,
+    OursRuntime& rt,
+    MetaPBS2::BlindRotatePruneStats* stats = nullptr) {
+    const int s = MetaPBS2::LSBIndexFromChapterBit(p_work, k) + 1;
+    const auto weight_ct = MetaPBS2::ExtractWeightedLowWindowPBS_Lvl02<
+        iksP_t, brP_logari>(
+            ct_work, p_work, s,
+            MetaPBS2::ArithmeticWeightForChapterBit<PIn::T>(p_work, k),
+            *rt.iksk, *rt.bk_logari, stats);
+    TFHEpp::TLWE<PIn> gap_ct{};
+    for (std::size_t i = 0; i < gap_ct.size(); i++)
+        gap_ct[i] = ct_work[i] - weight_ct[i];
+    MetaPBS2::RecordLvl2ToLvl0GatePBSStats<iksP_t, brP_logari>(stats);
+    if (stats) stats->pbs_count_final_msb++;
+    return MetaPBS2::NaiveSignPBS_Lvl02<iksP_t, brP_logari>(
+        gap_ct,
+        MetaPBS2::FinalGapOffsetForResidual<PIn::T>(p_work, k, rho_work),
+        *rt.iksk, *rt.bk_logari);
+}
+
 bool SupportedCurrentEncryptedPath(int p, const MetaPBS2::Algorithm1Config& cfg) {
     (void)cfg;
     return p <= 33;
@@ -59,6 +83,7 @@ struct WorkState {
     int p_work = 0;
     std::uint64_t m_reduced = 0;
     std::uint64_t m_work = 0;
+    MetaPBS2::ResidualInterval rho_work{};
 };
 
 WorkState ReduceOrZeroExtendToWork(
@@ -67,7 +92,7 @@ WorkState ReduceOrZeroExtendToWork(
     int p,
     OursRuntime& rt,
     MetaPBS2::BlindRotatePruneStats* stats = nullptr,
-    std::vector<MetaPBS2::PrecisionReduceRoundOutput<PIn>>* rounds = nullptr) {
+    std::vector<MetaPBS2::RecursiveGapRoundOutput<PIn>>* rounds = nullptr) {
     const int p_work = NativePrecision(rt.cfg);
     if (p <= p_work) {
         return WorkState{
@@ -76,17 +101,22 @@ WorkState ReduceOrZeroExtendToWork(
             .p_work = p_work,
             .m_reduced = m,
             .m_work = m << (p_work - p),
+            .rho_work = MetaPBS2::ResidualInterval{.lo = 0.0, .hi = 0.0},
         };
     }
-    const auto reduced = MetaPBS2::HE3DBStylePrecisionReduceToNative<iksP_t, brP_logari>(
-        ct, p, p_work, *rt.iksk, *rt.bk_logari, stats, rounds);
-    const auto m_reduced = m >> (p - reduced.p_out);
+    const auto reduced = MetaPBS2::RecursiveGapReduceToNative<iksP_t, brP_logari>(
+        ct, p, p_work, *rt.iksk, *rt.bk_logari, stats);
+    if (rounds) *rounds = reduced.round_outputs;
+    const auto sim = MetaPBS2::SimulateRecursiveGapReduce(
+        m, p, p_work, DefaultK(p_work));
+    const auto m_reduced = sim.m_work;
     return WorkState{
         .ct_work = reduced.ct_out,
         .p_reduced = reduced.p_out,
         .p_work = p_work,
         .m_reduced = m_reduced,
-        .m_work = m_reduced << (p_work - reduced.p_out),
+        .m_work = m_reduced,
+        .rho_work = reduced.rho_out,
     };
 }
 
@@ -106,10 +136,12 @@ bool CheckDeltaStateRows(int L, int trials, std::uint64_t seed,
         TFHEpp::TLWE<PIn> ct{};
         TFHEpp::tlweSymEncrypt<PIn>(
             ct, EncodeMessage<PIn>(m, p), PIn::α, rt.sk.key.get<PIn>());
-        std::vector<MetaPBS2::PrecisionReduceRoundOutput<PIn>> rounds;
+        std::vector<MetaPBS2::RecursiveGapRoundOutput<PIn>> rounds;
         MetaPBS2::BlindRotatePruneStats stats{};
         const auto work =
             ReduceOrZeroExtendToWork(ct, m, p, rt, &stats, &rounds);
+        const auto sim = MetaPBS2::SimulateRecursiveGapReduce(
+            m, p, p_work, DefaultK(p_work));
 
         bool printed_round = false;
         for (const auto& round : rounds) {
@@ -119,7 +151,11 @@ bool CheckDeltaStateRows(int L, int trials, std::uint64_t seed,
                 MetaPBS2::ReducerTorusScaleForPrecision<PIn::T>(round.p_out);
             const auto decoded =
                 DecodeArithmeticPhase(Phase<PIn>(round.ct_out, rt.sk), round.p_out);
-            const auto expected = m >> (p - round.p_out);
+            const auto& sim_round = sim.rounds.at(static_cast<std::size_t>(round.round));
+            const auto expected = static_cast<std::uint64_t>(
+                std::floor(static_cast<long double>(sim_round.q) +
+                           static_cast<long double>(sim_round.rho_out) + 0.5L)) &
+                ((std::uint64_t{1} << round.p_out) - 1);
             const bool ok = decoded == expected;
             printed_round = true;
             std::cout << "delta_state," << L << ',' << i
@@ -139,7 +175,11 @@ bool CheckDeltaStateRows(int L, int trials, std::uint64_t seed,
 
         const auto decoded_work =
             DecodeArithmeticPhase(Phase<PIn>(work.ct_work, rt.sk), p_work);
-        const bool work_ok = decoded_work == work.m_work;
+        const auto expected_work = static_cast<std::uint64_t>(
+            std::floor(static_cast<long double>(sim.m_work) +
+                       static_cast<long double>(sim.rho_work) + 0.5L)) &
+            ((std::uint64_t{1} << p_work) - 1);
+        const bool work_ok = decoded_work == expected_work;
         const int round_index =
             printed_round ? static_cast<int>(rounds.size()) : 0;
         std::cout << "delta_state," << L << ',' << i
@@ -148,7 +188,7 @@ bool CheckDeltaStateRows(int L, int trials, std::uint64_t seed,
                   << MetaPBS2::ReducerTorusScaleForPrecision<PIn::T>(work.p_reduced)
                   << ','
                   << MetaPBS2::ReducerTorusScaleForPrecision<PIn::T>(p_work)
-                  << ',' << m << ',' << decoded_work << ',' << work.m_work
+                  << ',' << m << ',' << decoded_work << ',' << expected_work
                   << ',' << (work_ok ? 1 : 0) << '\n';
         if (!work_ok) {
             RecordFailure(failures, Failure{
@@ -176,21 +216,6 @@ bool CheckGapIntermediates(int L, int trials, std::uint64_t seed,
     std::uniform_int_distribution<std::uint64_t> dist(
         0, (std::uint64_t{1} << p) - 1);
 
-    MetaPBS2::GapMSBOptions gap_options{
-        .p = p_work,
-        .k = k,
-        .kappa = std::max(1, p_work - k),
-        .enable_periodic_pruning = true,
-        .period = 0,
-        .weighted_mode = MetaPBS2::WeightedBitMode::LogicalOnly,
-    };
-    MetaPBS2::BitExtractOptions bit_options{
-        .p = p_work,
-        .k = k,
-        .enable_periodic_pruning = true,
-        .period = 0,
-    };
-
     std::cout << "section,L,trial,p_cur,k,w_k,m_original,m_cur,bit_k,"
                  "decoded_bit,expected_weight,decoded_weight,expected_gap,"
                  "decoded_gap,shifted_phase_ok,final_expected,final_got,ok,"
@@ -203,21 +228,26 @@ bool CheckGapIntermediates(int L, int trials, std::uint64_t seed,
 
         MetaPBS2::BlindRotatePruneStats stats{};
         const auto work = ReduceOrZeroExtendToWork(ct, m, p, rt, &stats);
-        auto bit_ct = MetaPBS2::BitExtractBoolPruned<brP_meta>(
-            work.ct_work, *rt.bk_meta, rt.trkeys, rt.cfg, bit_options, &stats);
+        auto bit_ct = MetaPBS2::BitExtractLowWindowBoolPruned<
+            iksP_t, brP_logari>(
+                work.ct_work, p_work, lsb_k + 1, *rt.iksk,
+                *rt.bk_logari, &stats);
         const int decoded_bit = MetaPBS2::DecodeBinaryCout<PIn>(
             bit_ct, rt.sk.key.get<PIn>());
         const int bit = static_cast<int>((work.m_work >> lsb_k) & 1);
 
-        auto weight_ct = MetaPBS2::BoolToWeightPBS<brP_meta>(
-            bit_ct, params.A_k, *rt.bk_meta, &stats);
+        auto weight_ct = MetaPBS2::BoolToWeightPBS_Lvl02<
+            iksP_t, brP_logari>(
+                bit_ct, params.A_k, *rt.iksk, *rt.bk_logari, &stats, false);
         TFHEpp::TLWE<PIn> gap_ct{};
         MetaPBS2::ClearChapterBitAssign<brP_meta>(gap_ct, work.ct_work, weight_ct);
         TFHEpp::TLWE<PIn> shifted_ct = gap_ct;
-        shifted_ct[PIn::k * PIn::n] += params.offset;
+        const auto final_offset = MetaPBS2::FinalGapOffsetForResidual<PIn::T>(
+            p_work, k, work.rho_work);
+        shifted_ct[PIn::k * PIn::n] += final_offset;
 
-        auto final_ct = MetaPBS2::GapMSB<brP_meta>(
-            work.ct_work, *rt.bk_meta, rt.trkeys, rt.cfg, gap_options, &stats);
+        auto final_ct = FinalGapMSBResidualAware(
+            work.ct_work, p_work, k, work.rho_work, rt, &stats);
         const int final_got = MetaPBS2::DecodeSignCout<PIn>(
             final_ct, rt.sk.key.get<PIn>());
         const int final_expected = static_cast<int>((m >> (p - 1)) & 1);
@@ -229,7 +259,7 @@ bool CheckGapIntermediates(int L, int trials, std::uint64_t seed,
         const std::uint64_t decoded_gap =
             DecodeArithmeticPhase(Phase<PIn>(gap_ct, rt.sk), p_work);
         const auto expected_shifted_phase =
-            static_cast<PIn::T>(expected_gap) * delta + params.offset;
+            static_cast<PIn::T>(expected_gap) * delta + final_offset;
         const bool shifted_ok =
             TorusDistance(Phase<PIn>(shifted_ct, rt.sk), expected_shifted_phase) <= half_delta;
         const bool ok = decoded_bit == bit &&
@@ -268,15 +298,6 @@ bool CheckBoundaryMSB(int L, int trials_per_case, std::uint64_t seed,
     const int p = L + 1;
     const int p_work = WorkPrecisionForComparison(L, rt.cfg);
     const int k = DefaultK(p_work);
-    MetaPBS2::GapMSBOptions options{
-        .p = p_work,
-        .k = k,
-        .kappa = std::max(1, p_work - k),
-        .enable_periodic_pruning = true,
-        .period = 0,
-        .weighted_mode = MetaPBS2::WeightedBitMode::LogicalOnly,
-    };
-
     std::vector<std::pair<std::uint64_t, std::string>> cases;
     const std::int64_t threshold = std::int64_t{1} << (p - 1);
     for (std::int64_t d = -64; d <= 64; d++) {
@@ -301,8 +322,8 @@ bool CheckBoundaryMSB(int L, int trials_per_case, std::uint64_t seed,
             TFHEpp::tlweSymEncrypt<PIn>(
                 ct, EncodeMessage<PIn>(m, p), PIn::α, rt.sk.key.get<PIn>());
             const auto work = ReduceOrZeroExtendToWork(ct, m, p, rt);
-            auto out = MetaPBS2::GapMSB<brP_meta>(
-                work.ct_work, *rt.bk_meta, rt.trkeys, rt.cfg, options, nullptr);
+            auto out = FinalGapMSBResidualAware(
+                work.ct_work, p_work, k, work.rho_work, rt, nullptr);
             const int got = MetaPBS2::DecodeSignCout<PIn>(
                 out, rt.sk.key.get<PIn>());
             const int expected = static_cast<int>((m >> (p - 1)) & 1);
@@ -381,14 +402,6 @@ bool CheckNoiseSweep(int L, int trials_per_point, std::uint64_t seed,
     const int p = L + 1;
     const int p_work = WorkPrecisionForComparison(L, rt.cfg);
     const int k = DefaultK(p_work);
-    MetaPBS2::GapMSBOptions options{
-        .p = p_work,
-        .k = k,
-        .kappa = std::max(1, p_work - k),
-        .enable_periodic_pruning = true,
-        .period = 0,
-        .weighted_mode = MetaPBS2::WeightedBitMode::LogicalOnly,
-    };
     const std::array<double, 5> multipliers = {0.5, 1.0, 1.5, 2.0, 3.0};
     std::mt19937_64 rng(seed ^ 0x4e4f495345ULL);
     std::uniform_int_distribution<std::uint64_t> dist(
@@ -403,8 +416,8 @@ bool CheckNoiseSweep(int L, int trials_per_point, std::uint64_t seed,
             TFHEpp::tlweSymEncrypt<PIn>(
                 ct, EncodeMessage<PIn>(m, p), PIn::α * mult, rt.sk.key.get<PIn>());
             const auto work = ReduceOrZeroExtendToWork(ct, m, p, rt);
-            auto out = MetaPBS2::GapMSB<brP_meta>(
-                work.ct_work, *rt.bk_meta, rt.trkeys, rt.cfg, options, nullptr);
+            auto out = FinalGapMSBResidualAware(
+                work.ct_work, p_work, k, work.rho_work, rt, nullptr);
             const int got = MetaPBS2::DecodeSignCout<PIn>(
                 out, rt.sk.key.get<PIn>());
             const int expected = static_cast<int>((m >> (p - 1)) & 1);
@@ -443,14 +456,6 @@ void PrintPerfCounterRow(int L, int p, std::uint64_t seed, OursRuntime& rt) {
     const int p_work = WorkPrecisionForComparison(L, rt.cfg);
     const int k = DefaultK(p_work);
     const auto params = MetaPBS2::MakeGapMSBRoundParams<PIn::T>(p, p_work, 0, k);
-    MetaPBS2::GapMSBOptions options{
-        .p = p_work,
-        .k = k,
-        .kappa = std::max(1, p_work - k),
-        .enable_periodic_pruning = true,
-        .period = 0,
-        .weighted_mode = MetaPBS2::WeightedBitMode::LogicalOnly,
-    };
     std::mt19937_64 rng(seed ^ 0x50455246ULL);
     std::uniform_int_distribution<std::uint64_t> dist(
         0, (std::uint64_t{1} << p) - 1);
@@ -461,8 +466,8 @@ void PrintPerfCounterRow(int L, int p, std::uint64_t seed, OursRuntime& rt) {
         ct, EncodeMessage<PIn>(m, p), PIn::α, rt.sk.key.get<PIn>());
     const auto start = std::chrono::steady_clock::now();
     const auto work = ReduceOrZeroExtendToWork(ct, m, p, rt, &stats);
-    auto out = MetaPBS2::GapMSB<brP_meta>(
-        work.ct_work, *rt.bk_meta, rt.trkeys, rt.cfg, options, &stats);
+    auto out = FinalGapMSBResidualAware(
+        work.ct_work, p_work, k, work.rho_work, rt, &stats);
     const double ms = MsSince(start);
     (void)out;
     const auto counters = ToCounters(stats);

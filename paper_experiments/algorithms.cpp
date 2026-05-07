@@ -140,6 +140,7 @@ MetaPBS2::GapMSBOptions ToGapMSBOptions(const Chapter3Params& params) {
     MetaPBS2::GapMSBOptions options;
     options.p = params.p;
     options.k = params.k;
+    options.kappa = params.kappa;
     options.enable_periodic_pruning = params.enable_periodic_pruning;
     return options;
 }
@@ -155,9 +156,9 @@ std::string Chapter3ParameterSummary(const Chapter3Params& params) {
 
 std::vector<std::string> Chapter3AlgorithmTrace() {
     return {
-        "BitExtract: build 0/Q/2 bit LUT, run Meta-PBS Algorithm 1, apply M_k=2^(p-k) pruning only in the first blind rotation.",
-        "GapMSB: extract bit_k, convert it to arithmetic weight w_k*Delta, subtract it from ct_I, add offset'=(w_k+1)Delta/2, then run sign PBS.",
-        "HomCompare: subtract operands, run recursive HomMSB on the signed difference; each recursive clear adds offset2=w_k*Delta/2 immediately, and the base sign PBS uses offset1=Delta/2.",
+        "BitExtractBoolPruned: build the concrete 0/Q/2 BoolHalf LUT, compute its exact 2N-slot negacyclic period, and use pruning only for rotations that leave that LUT invariant.",
+        "GapMSB: extract bit_k as BoolHalf, convert it with BoolToWeightPBS to w_k*Delta arithmetic scale, subtract the weighted-bit ciphertext, add offset=(w_k+1)Delta/2, then run the final sign PBS.",
+        "HomCompare: operands must already be encoded at unsigned L+1 comparison precision before subtraction; recursive HomMSB is then applied to the signed difference.",
     };
 }
 

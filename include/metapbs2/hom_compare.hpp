@@ -10,11 +10,24 @@
 // =============================================================
 
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include "metapbs2/gap_msb.hpp"
 
 namespace MetaPBS2 {
+
+inline int CheckedUnsignedComparisonPrecision(int plain_bits,
+                                              const Algorithm1Config& cfg) {
+    if (plain_bits <= 0)
+        throw std::invalid_argument("unsigned comparison requires positive operand bit width");
+    const int p_cmp = plain_bits + 1;
+    if (p_cmp > 33)
+        throw std::invalid_argument(
+            "unsigned comparison currently supports at most L+1=33 precision");
+    (void)cfg;
+    return p_cmp;
+}
 
 template <class brP_metapbs, class brP_logari, class brP_base, class iksP>
 TFHEpp::TLWE<typename brP_base::targetP>
@@ -31,11 +44,12 @@ HomGreaterThan(
     const HomMSBOptions& options = HomMSBOptions{},
     BlindRotatePruneStats* prune_stats = nullptr) {
     using domP = typename brP_metapbs::domainP;
+    const int p_cmp = CheckedUnsignedComparisonPrecision(plain_bits, cfg);
     constexpr int n1 = domP::k * domP::n + 1;
     TFHEpp::TLWE<domP> sub{};
     for (int i = 0; i < n1; i++) sub[i] = c1[i] - c0[i];
     return HomMSB<brP_metapbs, brP_logari, brP_base, iksP>(
-        sub, plain_bits + 1, bkfft, trkeys, cfg,
+        sub, p_cmp, bkfft, trkeys, cfg,
         bkfft_logari, bkfft_base, iksk, options, prune_stats);
 }
 
@@ -74,11 +88,12 @@ HomLessThan(
     const HomMSBOptions& options = HomMSBOptions{},
     BlindRotatePruneStats* prune_stats = nullptr) {
     using domP = typename brP_metapbs::domainP;
+    const int p_cmp = CheckedUnsignedComparisonPrecision(plain_bits, cfg);
     constexpr int n1 = domP::k * domP::n + 1;
     TFHEpp::TLWE<domP> sub{};
     for (int i = 0; i < n1; i++) sub[i] = c0[i] - c1[i];
     return HomMSB<brP_metapbs, brP_logari, brP_base, iksP>(
-        sub, plain_bits + 1, bkfft, trkeys, cfg,
+        sub, p_cmp, bkfft, trkeys, cfg,
         bkfft_logari, bkfft_base, iksk, options, prune_stats);
 }
 

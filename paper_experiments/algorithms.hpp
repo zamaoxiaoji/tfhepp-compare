@@ -63,7 +63,7 @@ TFHEpp::TLWE<typename brP::targetP> Chapter3BitExtract(
     const MetaPBS2::Algorithm1Config& cfg,
     const Chapter3Params& params,
     MetaPBS2::BlindRotatePruneStats* prune_stats = nullptr) {
-    return MetaPBS2::BitExtract<brP>(
+    return MetaPBS2::BitExtractBoolPruned<brP>(
         ct, bkfft, trkeys, cfg, ToBitExtractOptions(params), prune_stats);
 }
 

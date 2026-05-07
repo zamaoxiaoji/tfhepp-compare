@@ -25,10 +25,12 @@
 // =============================================================
 
 #include <cstdint>
+#include <cassert>
 #include <functional>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include "gatebootstrapping.hpp"
@@ -79,14 +81,104 @@ struct Algorithm1Config {
 };
 
 struct BlindRotatePruneStats {
+    std::uint64_t pbs_calls = 0;  // PBS / blind-rotation calls observed.
     std::uint64_t total = 0;    // CMUXes that would run without periodic pruning.
+    std::uint64_t cmux_calls = 0;  // CMUXes actually executed.
     std::uint64_t skipped = 0;  // CMUXes skipped by period invariance.
+    std::uint64_t key_switch_count = 0;
+    std::uint64_t pbs_count_reducer = 0;
+    std::uint64_t pbs_count_gapmsb = 0;
+    std::uint64_t pbs_count_bit_extract = 0;
+    std::uint64_t pbs_count_bool_to_weight = 0;
+    std::uint64_t pbs_count_final_msb = 0;
+    std::vector<int> periods;   // Exact slot-domain periods used by each LUT.
+    std::vector<std::uint64_t> total_by_pbs;
+    std::vector<std::uint64_t> cmux_by_pbs;
+    std::vector<std::uint64_t> skipped_by_pbs;
 
     std::uint64_t executed() const { return total - skipped; }
     double prune_rate() const {
         return total == 0 ? 0.0 : static_cast<double>(skipped) / static_cast<double>(total);
     }
 };
+
+inline bool IsPowerOfTwo(int x) {
+    return x > 0 && (x & (x - 1)) == 0;
+}
+
+inline bool IsMultipleOfPeriod(std::uint32_t x, int period) {
+    if (period <= 1) return true;
+    const auto p = static_cast<std::uint32_t>(period);
+    return IsPowerOfTwo(period) ? ((x & (p - 1)) == 0) : ((x % p) == 0);
+}
+
+inline bool IsMultipleOfPeriod(int x, int period) {
+    if (period <= 1) return true;
+    return IsPowerOfTwo(period) ? ((x & (period - 1)) == 0) : ((x % period) == 0);
+}
+
+template <class P>
+inline typename P::T NegacyclicExtendedCoeff(const TFHEpp::Polynomial<P>& tv, int j) {
+    constexpr int N = P::n;
+    const int twoN = 2 * N;
+    int idx = j % twoN;
+    if (idx < 0) idx += twoN;
+    if (idx < N) return tv[idx];
+    return typename P::T(0) - tv[idx - N];
+}
+
+template <class P>
+bool NegacyclicRotationInvariant(const TFHEpp::Polynomial<P>& tv, int shift) {
+    constexpr int N = P::n;
+    const int twoN = 2 * N;
+    int s = shift % twoN;
+    if (s < 0) s += twoN;
+    for (int j = 0; j < twoN; j++)
+        if (NegacyclicExtendedCoeff<P>(tv, j) !=
+            NegacyclicExtendedCoeff<P>(tv, j + s))
+            return false;
+    return true;
+}
+
+template <class P>
+std::size_t HashPolynomial(const TFHEpp::Polynomial<P>& tv) {
+    std::size_t h = 1469598103934665603ull;
+    for (auto x : tv) {
+        h ^= static_cast<std::size_t>(x);
+        h *= 1099511628211ull;
+    }
+    h ^= static_cast<std::size_t>(P::n);
+    h *= 1099511628211ull;
+    return h;
+}
+
+template <class P>
+int ExactNegacyclicPeriodUncached(const TFHEpp::Polynomial<P>& tv) {
+    constexpr int N = P::n;
+    const int twoN = 2 * N;
+    for (int p = 1; p <= twoN; p++)
+        if (twoN % p == 0 && NegacyclicRotationInvariant<P>(tv, p))
+            return p;
+    return twoN;
+}
+
+template <class P>
+int ExactNegacyclicPeriod(const TFHEpp::Polynomial<P>& tv) {
+    struct CacheEntry {
+        TFHEpp::Polynomial<P> tv;
+        int period;
+    };
+    static std::unordered_map<std::size_t, std::vector<CacheEntry>> cache;
+    const auto key = HashPolynomial<P>(tv);
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+        for (const auto& entry : it->second)
+            if (entry.tv == tv) return entry.period;
+    }
+    const int period = ExactNegacyclicPeriodUncached<P>(tv);
+    cache[key].push_back(CacheEntry{tv, period});
+    return period;
+}
 
 // =============================================================
 // BuildMetaPBSTV: build the test vector (paper-scale LUT)
@@ -190,13 +282,24 @@ void BlindRotateTLWEWithPeriod(
 
     if (period > 1 && twoN % period != 0)
         throw std::invalid_argument("BlindRotateTLWEWithPeriod: period must divide 2N");
+    if (stats) {
+        stats->pbs_calls++;
+        stats->key_switch_count++;
+        stats->periods.push_back(period > 0 ? period : twoN);
+    }
 
 #ifdef USE_KEY_BUNDLE
     if (stats) {
         TFHEpp::ModswitchTLWE<domP> moded;
         TFHEpp::BRModSwitch<brP, 1>(moded, ct);
+        std::uint64_t local_total = 0;
         for (int i = 0; i < n; i++)
-            if (moded[i] != 0) stats->total++;
+            if (moded[i] != 0) local_total++;
+        stats->total += local_total;
+        stats->cmux_calls += local_total;
+        stats->total_by_pbs.push_back(local_total);
+        stats->cmux_by_pbs.push_back(local_total);
+        stats->skipped_by_pbs.push_back(0);
     }
     TFHEpp::BlindRotate<brP>(ctOut, ct, bkfft, tv);
 #else
@@ -206,15 +309,31 @@ void BlindRotateTLWEWithPeriod(
     ctOut = {};
     TFHEpp::PolynomialMulByXai<tgtP>(ctOut[tgtP::k], tv, moded[n]);
 
+    std::uint64_t local_total = 0;
+    std::uint64_t local_skipped = 0;
+    std::uint64_t local_cmux = 0;
     for (int i = 0; i < n; i++) {
         uint32_t abar = moded[i];
         if (abar == 0) continue;
-        if (stats) stats->total++;
-        if (period > 1 && static_cast<int>(abar % static_cast<uint32_t>(period)) == 0) {
-            if (stats) stats->skipped++;
+        local_total++;
+        if (period > 1 && IsMultipleOfPeriod(abar, period)) {
+#ifndef NDEBUG
+            assert(NegacyclicRotationInvariant<tgtP>(
+                tv, static_cast<int>(abar % static_cast<std::uint32_t>(twoN))));
+#endif
+            local_skipped++;
             continue;
         }
+        local_cmux++;
         TFHEpp::CMUXwithPolynomialMulByXaiMinusOne<brP>(ctOut, bkfft[i], abar);
+    }
+    if (stats) {
+        stats->total += local_total;
+        stats->skipped += local_skipped;
+        stats->cmux_calls += local_cmux;
+        stats->total_by_pbs.push_back(local_total);
+        stats->cmux_by_pbs.push_back(local_cmux);
+        stats->skipped_by_pbs.push_back(local_skipped);
     }
 #endif
 }
@@ -248,21 +367,38 @@ void BlindRotateGLWEFromQuotient(
 
     if (period > 1 && twoN % period != 0)
         throw std::invalid_argument("BlindRotateGLWEFromQuotient: period must divide 2N");
+    if (stats) {
+        stats->pbs_calls++;
+        stats->key_switch_count++;
+        stats->periods.push_back(period > 0 ? period : twoN);
+    }
 
     int bbar = Mod2N<tgtP>(-SignedTorus(cquo[n]));
     for (int k = 0; k <= static_cast<int>(tgtP::k); k++)
         TFHEpp::PolynomialMulByXai<tgtP>(
             ctOut[k], ctAcc[k], static_cast<typename tgtP::T>(bbar));
 
+    std::uint64_t local_total = 0;
+    std::uint64_t local_skipped = 0;
+    std::uint64_t local_cmux = 0;
     for (int i = 0; i < n; i++) {
         int abar = Mod2N<tgtP>(SignedTorus(cquo[i]));
         if (abar == 0) continue;
-        if (stats) stats->total++;
-        if (period > 1 && abar % period == 0) {
-            if (stats) stats->skipped++;
+        local_total++;
+        if (period > 1 && IsMultipleOfPeriod(abar, period)) {
+            local_skipped++;
             continue;
         }
+        local_cmux++;
         TFHEpp::CMUXwithPolynomialMulByXaiMinusOne<brP>(ctOut, bkfft[i], abar);
+    }
+    if (stats) {
+        stats->total += local_total;
+        stats->skipped += local_skipped;
+        stats->cmux_calls += local_cmux;
+        stats->total_by_pbs.push_back(local_total);
+        stats->cmux_by_pbs.push_back(local_cmux);
+        stats->skipped_by_pbs.push_back(local_skipped);
     }
 }
 
@@ -355,7 +491,8 @@ RunAlgorithm1WithTV(
         HomDivRemAtScale<domP>(cquo_k, crem_k, prev_crem, current_mod, rnd.beta);
 
         TFHEpp::TRLWE<tgtP> Ck;
-        BlindRotateGLWEFromQuotient<brP>(Ck, cquo_k, Ck_prime, bkfft, N);
+        BlindRotateGLWEFromQuotient<brP>(
+            Ck, cquo_k, Ck_prime, bkfft, N, 0, prune_stats);
 
         current_mod *= rnd.beta;
         prev_GLWE = Ck;

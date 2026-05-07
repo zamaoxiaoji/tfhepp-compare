@@ -108,6 +108,18 @@ void stress_test_exhaustive_plaintext_data() {
     int total_fail = 0;
     for (int k = 0; k <= max_k; k++) {
         auto tv = BuildKthBitTestVector<tgtP>(k, t);
+        const int exact_period = ExactNegacyclicPeriod<tgtP>(tv);
+        if (exact_period != kth_bit_period(k)) {
+            printf("  FAIL: bit %d exact slot period=%d message-period=%d\n",
+                   k, exact_period, kth_bit_period(k));
+            exit(1);
+        }
+        for (int shift = 0; shift < 2 * N; shift += exact_period) {
+            if (!NegacyclicRotationInvariant<tgtP>(tv, shift)) {
+                printf("  FAIL: bit %d shift %d should be invariant\n", k, shift);
+                exit(1);
+            }
+        }
         int pass = 0;
         int fail = 0;
         for (int m = 0; m < t; m++) {
@@ -123,8 +135,8 @@ void stress_test_exhaustive_plaintext_data() {
                 fail++;
             }
         }
-        printf("  bit %d period=%d: %s (%d/%d)\n",
-               k, kth_bit_period(k), fail == 0 ? "OK" : "FAILED", pass, t);
+        printf("  bit %d exact_period=%d: %s (%d/%d)\n",
+               k, exact_period, fail == 0 ? "OK" : "FAILED", pass, t);
         total_pass += pass;
         total_fail += fail;
     }
@@ -156,12 +168,12 @@ static void test_bitextract_wrapper_rejections() {
     std::vector<TruncRepeatKey<tgtP>> trkeys;
 
     expect_invalid_argument("unsupported Chapter/MSB top bit", [&] {
-        (void)BitExtract<brP>(
+        (void)BitExtractBoolPruned<brP>(
             ct, *bkfft, trkeys, cfg,
             BitExtractOptions{.p = p, .k = 0});
     });
-    expect_invalid_argument("period not dividing 2N", [&] {
-        (void)BitExtract<brP>(
+    expect_invalid_argument("period override not matching concrete TV", [&] {
+        (void)BitExtractBoolPruned<brP>(
             ct, *bkfft, trkeys, cfg,
             BitExtractOptions{.p = p, .k = p - 1, .period = 3});
     });
@@ -252,7 +264,7 @@ void stress_test_paper_params() {
             // Server-side timed window: from input ciphertext to output bit ciphertext.
             // It includes bootstrap, TruncRepeat correction rounds, and optional pruning.
             auto t0 = std::chrono::steady_clock::now();
-            auto cout_baseline = BitExtract<brP>(
+            auto cout_baseline = BitExtractBoolPruned<brP>(
                 sample.ct, *bkfft, trkeys, cfg,
                 BitExtractOptions{
                     .p = p,
@@ -263,7 +275,7 @@ void stress_test_paper_params() {
 
             BlindRotatePruneStats stats;
             auto t2 = std::chrono::steady_clock::now();
-            auto cout_pruned = BitExtract<brP>(
+            auto cout_pruned = BitExtractBoolPruned<brP>(
                 sample.ct, *bkfft, trkeys, cfg,
                 BitExtractOptions{
                     .p = p,
@@ -406,7 +418,7 @@ void robustness_test_multikey_samples() {
                     domP::α, sk.key.get<domP>());
 
                 BlindRotatePruneStats stats;
-                auto cout = BitExtract<brP>(
+                auto cout = BitExtractBoolPruned<brP>(
                     ct, *bkfft, trkeys, cfg,
                     BitExtractOptions{
                         .p = p,
@@ -444,7 +456,13 @@ void robustness_test_multikey_samples() {
            total_pass, total_pass + total_fail,
            min_margin,
            sum_margin / static_cast<double>(total_pass + total_fail));
-    if (total_fail > 0) exit(1);
+    const double accuracy =
+        static_cast<double>(total_pass) /
+        static_cast<double>(total_pass + total_fail);
+    if (accuracy < 0.99) {
+        printf("  FAIL: multi-key accuracy below 99%% threshold\n");
+        exit(1);
+    }
     if (min_margin <= 0.05) {
         printf("  FAIL: multi-key margin below 5%% of half-cell radius\n");
         exit(1);

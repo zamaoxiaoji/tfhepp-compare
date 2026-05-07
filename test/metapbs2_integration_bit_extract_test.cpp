@@ -198,13 +198,13 @@ static void test_extract_kth_bit_api() {
     printf("  Extracting bit 0 (LSB)...\n");
     const int p = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
     BlindRotatePruneStats lsb_stats;
-    auto cout_lsb = BitExtract<brP>(
+    auto cout_lsb = BitExtractBoolPruned<brP>(
         enc_ct, *bkfft, trkeys, cfg,
         /*p=*/p, /*k=*/p - 1, &lsb_stats);
 
     printf("  Extracting bit 1...\n");
     BlindRotatePruneStats bit1_stats;
-    auto cout_b1 = BitExtract<brP>(
+    auto cout_b1 = BitExtractBoolPruned<brP>(
         enc_ct, *bkfft, trkeys, cfg,
         /*p=*/p, /*k=*/p - 2, &bit1_stats);
     (void)cout_b1;

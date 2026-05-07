@@ -18,6 +18,7 @@
 
 #include "cloudkey.hpp"
 #include "metapbs2/gap_msb.hpp"
+#include "metapbs2/hom_compare.hpp"
 #include "metapbs2/paper_params.hpp"
 
 using namespace MetaPBS2;
@@ -128,6 +129,36 @@ static void test_parameter_helpers() {
     printf("  PASSED\n");
 }
 
+static void test_unsigned_comparison_precision_rules() {
+    printf("[HomComp helpers] unsigned comparison uses L+1 precision\n");
+    auto cfg = PaperRowT2NConfig();
+    if (CheckedUnsignedComparisonPrecision(11, cfg) != 12) {
+        printf("  FAIL: 11-bit operands should use p_cmp=12\n");
+        exit(1);
+    }
+    expect_invalid_argument("12-bit operands rejected for p=12 config", [&] {
+        (void)CheckedUnsignedComparisonPrecision(12, cfg);
+    });
+    const int L = 4;
+    const int mod = 1 << (L + 1);
+    for (int a = 0; a < (1 << L); a++) {
+        for (int b = 0; b < (1 << L); b++) {
+            int diff_ab = (a - b + mod) % mod;
+            bool lt = diff_ab >= (1 << L);
+            int diff_ba = (b - a + mod) % mod;
+            bool gt = diff_ba >= (1 << L);
+            bool neq = lt || gt;
+            bool eq = !neq;
+            if (lt != (a < b) || gt != (a > b) || eq != (a == b)) {
+                printf("  FAIL a=%d b=%d lt=%d gt=%d eq=%d\n",
+                       a, b, lt, gt, eq);
+                exit(1);
+            }
+        }
+    }
+    printf("  exhaustive L=4 plaintext rule PASSED\n");
+}
+
 static void test_direct_logical_to_arithmetic(
     const TFHEpp::SecretKey& sk,
     const TFHEpp::BootstrappingKeyFFT<brP>& bkfft) {
@@ -147,7 +178,7 @@ static void test_direct_logical_to_arithmetic(
             P::α, sk.key.get<P>());
 
         auto weighted_ct =
-            LogicalBitToArithmeticWeight<brP>(bit_ct, weight_torus, bkfft);
+            BoolToWeightPBS<brP>(bit_ct, weight_torus, bkfft);
         auto phase = TFHEpp::tlweSymPhase<P>(weighted_ct, sk.key.get<P>());
         const int got = decode_arithmetic_message<P>(phase, p);
         const int want = bit ? weight : 0;
@@ -160,6 +191,35 @@ static void test_direct_logical_to_arithmetic(
         }
         printf("  bit=%d -> %d OK margin=%.3f\n", bit, got, margin);
     }
+
+    const auto q_over_4 = typename P::T(1)
+                          << (std::numeric_limits<typename P::T>::digits - 2);
+    const std::vector<std::make_signed_t<typename P::T>> perturb = {
+        -static_cast<std::make_signed_t<typename P::T>>(q_over_4 / 8),
+        static_cast<std::make_signed_t<typename P::T>>(0),
+        static_cast<std::make_signed_t<typename P::T>>(q_over_4 / 8),
+    };
+    for (int bit = 0; bit <= 1; bit++) {
+        for (auto noise : perturb) {
+            TFHEpp::TLWE<P> bit_ct{};
+            TFHEpp::tlweSymEncrypt<P>(
+                bit_ct,
+                bit ? BinaryScaleT<typename P::T> : typename P::T(0),
+                P::α, sk.key.get<P>());
+            bit_ct[P::k * P::n] += static_cast<typename P::T>(noise);
+            auto weighted_ct =
+                BoolToWeightPBS<brP>(bit_ct, weight_torus, bkfft);
+            auto phase = TFHEpp::tlweSymPhase<P>(weighted_ct, sk.key.get<P>());
+            const int got = decode_arithmetic_message<P>(phase, p);
+            const int want = bit ? weight : 0;
+            if (got != want) {
+                printf("  FAIL noisy bit=%d noise=%lld got=%d want=%d\n",
+                       bit, static_cast<long long>(noise), got, want);
+                exit(1);
+            }
+        }
+    }
+    printf("  noisy shifted-center margin checks PASSED\n");
     if (min_margin <= 0.05) {
         printf("  FAIL: arithmetic conversion margin below 5%%\n");
         exit(1);
@@ -180,6 +240,10 @@ static void test_gapmsb_parameter_rejections(
     expect_invalid_argument("k>=p unsupported", [&] {
         (void)GapMSB<brP>(ct, bkfft, trkeys, cfg,
                           GapMSBOptions{.p = 12, .k = 12});
+    });
+    expect_invalid_argument("k outside final kappa-bit window", [&] {
+        (void)GapMSB<brP>(ct, bkfft, trkeys, cfg,
+                          GapMSBOptions{.p = 12, .k = 4});
     });
     expect_invalid_argument("cfg.t != 2^p", [&] {
         (void)GapMSB<brP>(ct, bkfft, trkeys, cfg,
@@ -266,7 +330,7 @@ static void stress_gapmsb_correctness(
     const Algorithm1Config& cfg) {
     printf("[GapMSB stress] boundary and random samples\n");
     const int p = MessagePrecisionFromPowerOfTwoModulus(cfg.t);
-    const std::vector<int> chapter_bits = {1, 4, 7, 10, 11};
+    const std::vector<int> chapter_bits = {7, 10, 11};
     std::mt19937 rng(424242);
     int total_pass = 0;
     int total_fail = 0;
@@ -303,7 +367,9 @@ static void stress_gapmsb_correctness(
                 &stats);
             auto t1 = std::chrono::steady_clock::now();
             bit_ms += elapsed_ms(t0, t1);
+            bit_stats.pbs_calls += stats.pbs_calls;
             bit_stats.total += stats.total;
+            bit_stats.cmux_calls += stats.cmux_calls;
             bit_stats.skipped += stats.skipped;
 
             auto phase = TFHEpp::tlweSymPhase<P>(out, sk.key.get<P>());
@@ -319,23 +385,28 @@ static void stress_gapmsb_correctness(
                 fail++;
             }
         }
-        printf("%s prune=%.2f%% skipped=%lu/%lu time=%.2fms\n",
+        printf("%s prune=%.2f%% skipped=%lu/%lu pbs=%lu cmux=%lu time=%.2fms\n",
                fail == 0 ? "OK" : "FAILED",
                100.0 * bit_stats.prune_rate(),
-               bit_stats.skipped, bit_stats.total, bit_ms);
+               bit_stats.skipped, bit_stats.total,
+               bit_stats.pbs_calls, bit_stats.cmux_calls, bit_ms);
         total_pass += pass;
         total_fail += fail;
         total_ms += bit_ms;
         all_stats.total += bit_stats.total;
+        all_stats.pbs_calls += bit_stats.pbs_calls;
+        all_stats.cmux_calls += bit_stats.cmux_calls;
         all_stats.skipped += bit_stats.skipped;
     }
 
-    printf("  Total accuracy=%.6f%% (%d/%d) prune=%.2f%% time=%.2fms "
+    printf("  Total accuracy=%.6f%% (%d/%d) prune=%.2f%% pbs=%lu cmux=%lu time=%.2fms "
            "sign_margin_min=%.3f\n",
            100.0 * static_cast<double>(total_pass) /
                static_cast<double>(total_pass + total_fail),
            total_pass, total_pass + total_fail,
-           100.0 * all_stats.prune_rate(), total_ms, min_sign_margin);
+           100.0 * all_stats.prune_rate(),
+           all_stats.pbs_calls, all_stats.cmux_calls,
+           total_ms, min_sign_margin);
     if (total_fail > 0) exit(1);
     if (min_sign_margin <= 0.05) {
         printf("  FAIL: sign margin below 5%%\n");
@@ -413,6 +484,7 @@ static void robustness_multikey_recursive_gapmsb(
 int main() {
     printf("=== MetaPBS2 GapMSB Test ===\n");
     test_parameter_helpers();
+    test_unsigned_comparison_precision_rules();
 
     auto cfg = PaperRowT2NConfig();
     TFHEpp::SecretKey sk;

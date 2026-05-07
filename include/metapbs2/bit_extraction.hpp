@@ -69,7 +69,9 @@ struct BitExtractOptions {
     int p;       // Message precision. For the current exact path, cfg.t = 2^p = 2N.
     int k;       // Chapter-3 bit index: k=0 is the top/sign bit, k=p-1 is LSB.
     bool enable_periodic_pruning = true;
-    int period = 0;  // 0 means derive M_k from p,k; otherwise use this pruning period.
+    // Optional assertion for the exact slot-domain period. A nonzero value must
+    // match the period measured from the concrete negacyclic test vector.
+    int period = 0;
 };
 
 inline int CheckedPowerOfTwo(int exponent) {
@@ -86,8 +88,12 @@ inline int LSBIndexFromChapterBit(int p, int k) {
     return p - 1 - k;
 }
 
-inline int BitExtractPeriodFromChapterBit(int p, int k) {
+inline int MessageDomainBitPeriodFromChapterBit(int p, int k) {
     return CheckedPowerOfTwo(LSBIndexFromChapterBit(p, k) + 1);
+}
+
+inline int BitExtractPeriodFromChapterBit(int p, int k) {
+    return MessageDomainBitPeriodFromChapterBit(p, k);
 }
 
 inline int MessagePrecisionFromPowerOfTwoModulus(int t) {
@@ -233,21 +239,24 @@ ExtractLSB(
 }
 
 // =============================================================
-// BitExtract: Chapter-3 periodic-pruned iterative bit extraction.
+// BitExtractBoolPruned: Chapter-3 periodic-pruned iterative bit extraction.
 //
 // This is the paper-facing wrapper for algorithm
 // alg:full_periodic_pruned_iterative_pbs:
 //   1. Interpret k in the Chapter-3/MSB-side convention.
-//   2. Compute w_k=2^{p-1-k} and M_k=2w_k automatically.
-//   3. Run the Meta-PBS exact extraction path.
-//   4. Apply M_k-periodic pruning only in the first blind rotation.
+//   2. Build the concrete Boolean-half LUT (0 or Q/2).
+//   3. Measure its exact period in the 2N negacyclic slot domain.
+//   4. Run the Meta-PBS exact extraction path using only that measured period.
 //
 // The current exact implementation supports the t=2N paper row. Thus cfg.t
 // must equal 2^p and the converted LSB-side bit must be in the supported range.
+// Returned ciphertexts are TLWE<tgtP>. They may be combined with the input TLWE
+// only when domP and tgtP are the same key/modulus/encoding type; otherwise a
+// caller must key-switch explicitly before any linear operation.
 // =============================================================
 template <class brP>
 TFHEpp::TLWE<typename brP::targetP>
-BitExtract(
+BitExtractBoolPruned(
     const TFHEpp::TLWE<typename brP::domainP>& ct,
     const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
     const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
@@ -264,19 +273,52 @@ BitExtract(
 
     int lsb_k = LSBIndexFromChapterBit(options.p, options.k);
     if (lsb_k > MaxExtractableBit(N))
-        throw std::invalid_argument("BitExtract requested bit is not supported by 0/Q/2 negacyclic encoding");
+        throw std::invalid_argument("BitExtractBoolPruned requested bit is not supported by 0/Q/2 negacyclic encoding");
+
+    auto tv = BuildKthBitTestVector<tgtP>(lsb_k, cfg.t);
+    const int exact_period = ExactNegacyclicPeriod<tgtP>(tv);
+    if (options.period > 0 && options.period != exact_period)
+        throw std::invalid_argument("BitExtractBoolPruned period override does not match concrete TV period");
 
     int first_period = 0;
     if (options.enable_periodic_pruning)
-        first_period = options.period > 0
-                           ? options.period
-                           : BitExtractPeriodFromChapterBit(options.p, options.k);
+        first_period = exact_period;
 
-    return ExtractKthBit<brP>(
-        ct, lsb_k, cfg.t, bkfft, trkeys, cfg, first_period, prune_stats);
+    return RunAlgorithm1WithTV<brP>(
+        ct, tv, bkfft, trkeys, cfg, first_period, prune_stats);
 }
 
 template <class brP>
+TFHEpp::TLWE<typename brP::targetP>
+BitExtractBoolPruned(
+    const TFHEpp::TLWE<typename brP::domainP>& ct,
+    const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
+    const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
+    const Algorithm1Config& cfg,
+    int p, int k,
+    BlindRotatePruneStats* prune_stats = nullptr) {
+    return BitExtractBoolPruned<brP>(
+        ct, bkfft, trkeys, cfg,
+        BitExtractOptions{.p = p, .k = k},
+        prune_stats);
+}
+
+template <class brP>
+[[deprecated("Use BitExtractBoolPruned for the explicit 0/Q/2 Boolean-half API")]]
+TFHEpp::TLWE<typename brP::targetP>
+BitExtract(
+    const TFHEpp::TLWE<typename brP::domainP>& ct,
+    const TFHEpp::BootstrappingKeyFFT<brP>& bkfft,
+    const std::vector<TruncRepeatKey<typename brP::targetP>>& trkeys,
+    const Algorithm1Config& cfg,
+    const BitExtractOptions& options,
+    BlindRotatePruneStats* prune_stats = nullptr) {
+    return BitExtractBoolPruned<brP>(
+        ct, bkfft, trkeys, cfg, options, prune_stats);
+}
+
+template <class brP>
+[[deprecated("Use BitExtractBoolPruned for the explicit 0/Q/2 Boolean-half API")]]
 TFHEpp::TLWE<typename brP::targetP>
 BitExtract(
     const TFHEpp::TLWE<typename brP::domainP>& ct,
@@ -285,10 +327,8 @@ BitExtract(
     const Algorithm1Config& cfg,
     int p, int k,
     BlindRotatePruneStats* prune_stats = nullptr) {
-    return BitExtract<brP>(
-        ct, bkfft, trkeys, cfg,
-        BitExtractOptions{.p = p, .k = k},
-        prune_stats);
+    return BitExtractBoolPruned<brP>(
+        ct, bkfft, trkeys, cfg, p, k, prune_stats);
 }
 
 template <typename T>
@@ -391,14 +431,17 @@ BitExtractWeighted(
     if (lsb_k > MaxExtractableBit(N))
         throw std::invalid_argument("BitExtractWeighted requested bit is not supported by negacyclic encoding");
 
+    auto tv = BuildWeightedBitTestVector<tgtP>(lsb_k, cfg.t, weight_torus);
+    const int exact_period = ExactNegacyclicPeriod<tgtP>(tv);
+    if (options.period > 0 && options.period != exact_period)
+        throw std::invalid_argument("BitExtractWeighted period override does not match concrete TV period");
+
     int first_period = 0;
     if (options.enable_periodic_pruning)
-        first_period = options.period > 0
-                           ? options.period
-                           : BitExtractPeriodFromChapterBit(options.p, options.k);
+        first_period = exact_period;
 
-    return ExtractKthBitWeighted<brP>(
-        ct, lsb_k, cfg.t, weight_torus, bkfft, trkeys, cfg, first_period, prune_stats);
+    return RunAlgorithm1WithTV<brP>(
+        ct, tv, bkfft, trkeys, cfg, first_period, prune_stats);
 }
 
 }  // namespace MetaPBS2

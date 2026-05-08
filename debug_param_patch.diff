@@ -1,0 +1,38 @@
+diff --git a/include/params/128bit.hpp b/include/params/128bit.hpp
+index d0345bd..52fc1f1 100644
+--- a/include/params/128bit.hpp
++++ b/include/params/128bit.hpp
+@@ -88,6 +88,7 @@ struct AHlvl1param {
+ struct lvl2param {
+     static constexpr int32_t key_value_max = 1;
+     static constexpr int32_t key_value_min = -1;
++    static constexpr int32_t key_value_diff = key_value_max - key_value_min;
+     static const std::uint32_t nbit = 11;  // dimension must be a power of 2 for
+                                            // ease of polynomial multiplication.
+     static constexpr std::uint32_t n = 1 << nbit;  // dimension
+@@ -260,4 +261,4 @@ struct lvl31param {
+     static const inline double α = lvl1param::α;  // key noise
+     using domainP = lvl3param;
+     using targetP = lvl1param;
+-};
+\ No newline at end of file
++};
+diff --git a/include/params/concrete.hpp b/include/params/concrete.hpp
+index a25da75..683f220 100644
+--- a/include/params/concrete.hpp
++++ b/include/params/concrete.hpp
+@@ -77,6 +77,7 @@ using AHlvl1param = lvl1param;
+ struct lvl2param {
+     static constexpr int32_t key_value_max = 1;
+     static constexpr int32_t key_value_min = -1;
++    static constexpr int32_t key_value_diff = key_value_max - key_value_min;
+     static const std::uint32_t nbit = 10;  // dimension must be a power of 2 for
+                                            // ease of polynomial multiplication.
+     static constexpr std::uint32_t n = 1 << nbit;  // dimension
+@@ -211,4 +212,4 @@ struct lvl31param {
+     static const inline double α = lvl1param::α;  // key noise
+     using domainP = lvl3param;
+     using targetP = lvl1param;
+-};
+\ No newline at end of file
++};

@@ -164,6 +164,100 @@ if(USE_RANDEN)
 endif()
 add_subdirectory(src)
 
+function(add_my_ethmsb_target target source)
+  add_executable(${target} EXCLUDE_FROM_ALL ${source})
+  target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(${target} tfhe++)
+  target_compile_features(${target} PRIVATE cxx_std_20)
+endfunction()
+
+set(HE3DB_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../HE3DB/src")
+set(MY_ETHMSB_HE3DB_SOURCES
+    "${HE3DB_SOURCE_DIR}/HEDB/comparison/tfhepp_utils.cpp"
+    "${HE3DB_SOURCE_DIR}/HEDB/comparison/operators.cpp"
+    "${HE3DB_SOURCE_DIR}/HEDB/comparison/extract_msb.cpp")
+
+function(add_my_ethmsb_he3db_target target source)
+  add_executable(${target} EXCLUDE_FROM_ALL ${source}
+                                             ${MY_ETHMSB_HE3DB_SOURCES})
+  target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}
+                                               ${HE3DB_SOURCE_DIR}
+                                               ${HE3DB_SOURCE_DIR}/HEDB/comparison)
+  target_link_libraries(${target} tfhe++)
+  target_compile_features(${target} PRIVATE cxx_std_20)
+endfunction()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_tests my_ethmsb_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_bench.cpp")
+  add_my_ethmsb_target(my_ethmsb_bench my_ethmsb_bench.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_static_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_static_tests my_ethmsb_static_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_trace_one.cpp")
+  add_my_ethmsb_target(my_ethmsb_trace_one my_ethmsb_trace_one.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pbs_matrix_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_pbs_matrix_tests
+                       my_ethmsb_pbs_matrix_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_switchband.cpp")
+  add_my_ethmsb_target(my_ethmsb_switchband my_ethmsb_switchband.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_margin_cert.cpp")
+  add_my_ethmsb_target(my_ethmsb_margin_cert my_ethmsb_margin_cert.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_random_resumable.cpp")
+  add_my_ethmsb_target(my_ethmsb_random_resumable
+                       my_ethmsb_random_resumable.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_iks_precision_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_iks_precision_tests
+                       my_ethmsb_iks_precision_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_h3compat_targeted_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_h3compat_targeted_tests
+                       my_ethmsb_h3compat_targeted_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_he3db_fairness_audit.cpp")
+  add_my_ethmsb_target(my_ethmsb_he3db_fairness_audit
+                       my_ethmsb_he3db_fairness_audit.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_fair_he3db_comparison_test.cpp")
+  add_my_ethmsb_target(my_ethmsb_fair_he3db_comparison_test
+                       my_ethmsb_fair_he3db_comparison_test.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_he3db_style_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_he3db_style_tests
+                       my_ethmsb_he3db_style_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_compare_he3db.cpp"
+   AND EXISTS "${HE3DB_SOURCE_DIR}/HEDB/comparison/HomCompare.h")
+  add_my_ethmsb_he3db_target(my_ethmsb_compare_he3db
+                             my_ethmsb_compare_he3db.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_bench_he3db_style.cpp"
+   AND EXISTS "${HE3DB_SOURCE_DIR}/HEDB/comparison/HomCompare.h")
+  add_my_ethmsb_he3db_target(my_ethmsb_bench_he3db_style
+                             my_ethmsb_bench_he3db_style.cpp)
+endif()
+
 if(ENABLE_TEST)
   add_subdirectory(test)
   add_subdirectory(thirdparties/AES)

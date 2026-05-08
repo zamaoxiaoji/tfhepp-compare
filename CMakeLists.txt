@@ -236,6 +236,16 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_he3db_fairness_audit.cpp")
                        my_ethmsb_he3db_fairness_audit.cpp)
 endif()
 
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_offset_semantics_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_offset_semantics_tests
+                       my_ethmsb_offset_semantics_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_delta_prime_semantics_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_delta_prime_semantics_tests
+                       my_ethmsb_delta_prime_semantics_tests.cpp)
+endif()
+
 if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_fair_he3db_comparison_test.cpp")
   add_my_ethmsb_target(my_ethmsb_fair_he3db_comparison_test
                        my_ethmsb_fair_he3db_comparison_test.cpp)

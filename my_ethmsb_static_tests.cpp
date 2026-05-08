@@ -109,48 +109,41 @@ void ethmsb(TFHEpp::TLWE<P2>& out, const TFHEpp::TLWE<P2>& ct, const int k,
             const int kappa, const Torus out_value, const Context& ctx)
 {
     if (k <= kappa) {
-        pbs(out, ct, delta(k) / 2, out_value, ctx);
+        pbs(out, ct, my_ethmsb::base_offset_for_current_layer(k), out_value,
+            ctx);
         return;
     }
     TFHEpp::TLWE<P2> shifted;
     my_ethmsb::scalar_mul_pow2<P2>(shifted, ct, kappa);
     const int suffix_bits = k - kappa;
-    const int w = k - kappa - 1;
-    const Torus guard_weight = Torus{1} << w;
     const Torus guard_value =
-        static_cast<Torus>(Wide{delta(k)} * Wide{guard_weight});
+        my_ethmsb::guard_value_for_parent_scale(k, kappa);
     TFHEpp::TLWE<P2> guard;
     ethmsb(guard, shifted, suffix_bits, kappa, guard_value, ctx);
     TFHEpp::TLWE<P2> guarded;
     my_ethmsb::sub<P2>(guarded, ct, guard);
-    const Torus final_offset =
-        static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                            Wide{delta(k)}) /
-                           Wide{2});
-    pbs(out, guarded, final_offset, out_value, ctx);
+    pbs(out, guarded, my_ethmsb::gap_offset_for_current_layer(k, kappa),
+        out_value, ctx);
 }
 
 bool semantic_ethmsb(const Torus m, const int k, const int kappa,
                      Torus& min_distance)
 {
     if (k <= kappa) {
-        const Torus after = encode(m, k) + delta(k) / 2;
+        const Torus after =
+            encode(m, k) + my_ethmsb::base_offset_for_current_layer(k);
         min_distance = std::min(
             min_distance,
             my_ethmsb::torus_abs_centered(after - (Torus{1} << 63)));
         return (after & (Torus{1} << 63)) != 0;
     }
     const int suffix_bits = k - kappa;
-    const int w = k - kappa - 1;
     const Torus suffix_plain = m & ((Torus{1} << suffix_bits) - 1);
     const bool guard = semantic_ethmsb(suffix_plain, suffix_bits, kappa,
                                        min_distance);
-    const Torus guard_weight = Torus{1} << w;
+    const Torus guard_weight = my_ethmsb::guard_weight(k, kappa);
     const Torus guarded_plain = m - (guard ? guard_weight : Torus{0});
-    const Torus final_offset =
-        static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                            Wide{delta(k)}) /
-                           Wide{2});
+    const Torus final_offset = my_ethmsb::gap_offset_for_current_layer(k, kappa);
     const Torus after = encode(guarded_plain, k) + final_offset;
     min_distance = std::min(
         min_distance,

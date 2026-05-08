@@ -117,8 +117,9 @@ public:
 
         if (k <= kappa) {
             std::cout << "case=base\n";
-            TLWE2 out = trace_pbs(ct, k, delta(k) / 2, out_value,
-                                  expected_plain, depth);
+            TLWE2 out =
+                trace_pbs(ct, k, my_ethmsb::base_offset_for_current_layer(k),
+                          out_value, expected_plain, depth);
             std::cout << "END_ETHMSB_NODE\n";
             return out;
         }
@@ -129,9 +130,9 @@ public:
         const int suffix_bits = k - kappa;
         const Torus suffix_plain = expected_plain & mask_for(suffix_bits);
         const int w = k - kappa - 1;
-        const Torus guard_weight = Torus{1} << w;
+        const Torus guard_weight = my_ethmsb::guard_weight(k, kappa);
         const Torus guard_value =
-            static_cast<Torus>(Wide{delta(k)} * Wide{guard_weight});
+            my_ethmsb::guard_value_for_parent_scale(k, kappa);
         std::cout << "suffix_bits=" << suffix_bits << "\n";
         std::cout << "shifted_phase_hex=" << hex64(phase64(shifted)) << "\n";
         std::cout << "expected_suffix_plain=" << suffix_plain << "\n";
@@ -153,9 +154,7 @@ public:
         my_ethmsb::sub<P2>(guarded, ct, guard);
         const Torus guarded_phase = phase64(guarded);
         const Torus final_offset =
-            static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                                Wide{delta(k)}) /
-                               Wide{2});
+            my_ethmsb::gap_offset_for_current_layer(k, kappa);
         std::cout << "guarded_phase_hex=" << hex64(guarded_phase) << "\n";
         std::cout << "w=" << w << "\n";
         std::cout << "final_offset_hex=" << hex64(final_offset) << "\n";
@@ -249,8 +248,9 @@ public:
         std::cout << "expected_msb=" << ((expected_plain >> (k - 1)) & 1) << "\n";
         if (k <= kappa) {
             std::cout << "case=base\n";
-            TLWE2 out = trace_pbs(ct, k, delta(k) / 2, out_value,
-                                  expected_plain, depth);
+            TLWE2 out =
+                trace_pbs(ct, k, my_ethmsb::base_offset_for_current_layer(k),
+                          out_value, expected_plain, depth);
             std::cout << "END_ETHMSB_NODE\n";
             return out;
         }
@@ -261,9 +261,9 @@ public:
         const int suffix_bits = k - kappa;
         const Torus suffix_plain = expected_plain & mask_for(suffix_bits);
         const int w = k - kappa - 1;
-        const Torus guard_weight = Torus{1} << w;
+        const Torus guard_weight = my_ethmsb::guard_weight(k, kappa);
         const Torus guard_value =
-            static_cast<Torus>(Wide{delta(k)} * Wide{guard_weight});
+            my_ethmsb::guard_value_for_parent_scale(k, kappa);
         std::cout << "suffix_bits=" << suffix_bits << "\n";
         std::cout << "shifted_phase_hex=" << hex64(phase64(shifted)) << "\n";
         std::cout << "expected_suffix_plain=" << suffix_plain << "\n";
@@ -284,9 +284,7 @@ public:
         my_ethmsb::sub<P2>(guarded, ct, guard);
         const Torus guarded_phase = phase64(guarded);
         const Torus final_offset =
-            static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                                Wide{delta(k)}) /
-                               Wide{2});
+            my_ethmsb::gap_offset_for_current_layer(k, kappa);
         std::cout << "guarded_phase_hex=" << hex64(guarded_phase) << "\n";
         std::cout << "w=" << w << "\n";
         std::cout << "final_offset_hex=" << hex64(final_offset) << "\n";

@@ -262,19 +262,18 @@ TFHEpp::TLWE<P2> ethmsb_trace(std::ostream& out, const Context& ctx,
 {
     if (current_k <= kappa) {
         return pbs_trace(out, ctx, ct, root_k, depth, stage, current_k, kappa,
-                         plaintext, delta(current_k) / 2, out_value,
-                         measured_switch_band, safety_budget, cert_id,
-                         summary);
+                         plaintext,
+                         my_ethmsb::base_offset_for_current_layer(current_k),
+                         out_value, measured_switch_band, safety_budget,
+                         cert_id, summary);
     }
 
     TFHEpp::TLWE<P2> shifted;
     my_ethmsb::scalar_mul_pow2<P2>(shifted, ct, kappa);
     const int suffix_bits = current_k - kappa;
     const Torus suffix_plain = plaintext & mask_for(suffix_bits);
-    const int w = current_k - kappa - 1;
-    const Torus guard_weight = Torus{1} << w;
     const Torus guard_value =
-        static_cast<Torus>(Wide{delta(current_k)} * Wide{guard_weight});
+        my_ethmsb::guard_value_for_parent_scale(current_k, kappa);
     TFHEpp::TLWE<P2> guard = ethmsb_trace(
         out, ctx, shifted, root_k, suffix_bits, kappa, suffix_plain,
         guard_value, depth + 1, "guard", measured_switch_band, safety_budget,
@@ -285,14 +284,14 @@ TFHEpp::TLWE<P2> ethmsb_trace(std::ostream& out, const Context& ctx,
     const bool expected_guard =
         ((suffix_plain >> (suffix_bits - 1)) & Torus{1}) != 0;
     const Torus guarded_plain =
-        plaintext - (expected_guard ? guard_weight : Torus{0});
-    const Torus final_offset =
-        static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                            Wide{delta(current_k)}) /
-                           Wide{2});
+        plaintext -
+        (expected_guard ? my_ethmsb::guard_weight(current_k, kappa)
+                        : Torus{0});
     return pbs_trace(out, ctx, guarded, root_k, depth, "final", current_k,
-                     kappa, guarded_plain, final_offset, out_value,
-                     measured_switch_band, safety_budget, cert_id, summary);
+                     kappa, guarded_plain,
+                     my_ethmsb::gap_offset_for_current_layer(current_k, kappa),
+                     out_value, measured_switch_band, safety_budget, cert_id,
+                     summary);
 }
 
 std::vector<Torus> boundary_candidates(const int k)

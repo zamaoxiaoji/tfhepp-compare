@@ -96,8 +96,9 @@ inline void ethmsb_value_l2_to_l2(
         throw std::invalid_argument("out_value_l2 must be nonzero");
 
     if (k <= kappa) {
-        pbs_msb_value_l2_to_l2(out, ct, k, delta(k) / 2, out_value_l2,
-                               iksk20, bkfft02);
+        pbs_msb_value_l2_to_l2(out, ct, k,
+                               my_ethmsb::base_offset_for_current_layer(k),
+                               out_value_l2, iksk20, bkfft02);
         return;
     }
 
@@ -105,10 +106,8 @@ inline void ethmsb_value_l2_to_l2(
     my_ethmsb::scalar_mul_pow2<P2>(shifted, ct, kappa);
 
     const int suffix_bits = k - kappa;
-    const int w = k - kappa - 1;
-    const Torus guard_weight = Torus{1} << w;
     const Torus guard_value =
-        static_cast<Torus>(Wide{delta(k)} * Wide{guard_weight});
+        my_ethmsb::guard_value_for_parent_scale(k, kappa);
 
     alignas(64) TFHEpp::TLWE<P2> guard;
     ethmsb_value_l2_to_l2(guard, shifted, suffix_bits, kappa, guard_value,
@@ -117,12 +116,9 @@ inline void ethmsb_value_l2_to_l2(
     alignas(64) TFHEpp::TLWE<P2> guarded;
     my_ethmsb::sub<P2>(guarded, ct, guard);
 
-    const Torus final_offset =
-        static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                            Wide{delta(k)}) /
-                           Wide{2});
-    pbs_msb_value_l2_to_l2(out, guarded, k, final_offset, out_value_l2,
-                           iksk20, bkfft02);
+    pbs_msb_value_l2_to_l2(out, guarded, k,
+                           my_ethmsb::gap_offset_for_current_layer(k, kappa),
+                           out_value_l2, iksk20, bkfft02);
 }
 
 inline int ethmsb_pbs_count(const int k, const int kappa)

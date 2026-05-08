@@ -49,10 +49,40 @@ inline void require_kappa(const int kappa)
         throw std::invalid_argument("ETHMSB supports 1 <= kappa <= 62");
 }
 
-inline Torus delta(const int k)
+inline Torus delta_bits(const int k)
 {
     require_k(k);
     return Torus{1} << (64 - k);
+}
+
+inline Torus delta(const int k) { return delta_bits(k); }
+
+inline Torus base_offset_for_current_layer(const int k)
+{
+    return delta_bits(k) / 2;
+}
+
+inline Torus guard_weight(const int k, const int kappa)
+{
+    require_k(k);
+    require_kappa(kappa);
+    if (k <= kappa)
+        throw std::invalid_argument(
+            "guard_weight is defined only for recursive ETHMSB layers");
+    return Torus{1} << (k - kappa - 1);
+}
+
+inline Torus guard_value_for_parent_scale(const int k, const int kappa)
+{
+    return static_cast<Torus>(Wide{delta_bits(k)} *
+                              Wide{guard_weight(k, kappa)});
+}
+
+inline Torus gap_offset_for_current_layer(const int k, const int kappa)
+{
+    return static_cast<Torus>((Wide{guard_weight(k, kappa) + Torus{1}} *
+                               Wide{delta_bits(k)}) /
+                              Wide{2});
 }
 
 inline Torus mask_bits(const int k)
@@ -297,7 +327,8 @@ void ethmsb_value(TFHEpp::TLWE<typename BRP::targetP>& out,
     if (out_value == 0) throw std::invalid_argument("out_value must be nonzero");
 
     if (k <= kappa) {
-        pbs_msb_value<BRP>(out, ct, k, delta(k) / 2, out_value, bkfft);
+        pbs_msb_value<BRP>(out, ct, k, base_offset_for_current_layer(k),
+                           out_value, bkfft);
         return;
     }
 
@@ -305,10 +336,7 @@ void ethmsb_value(TFHEpp::TLWE<typename BRP::targetP>& out,
     scalar_mul_pow2<typename BRP::domainP>(shifted, ct, kappa);
 
     const int suffix_bits = k - kappa;
-    const int w = k - kappa - 1;
-    const Torus guard_weight = Torus{1} << w;
-    const Torus guard_value =
-        static_cast<Torus>(Wide{delta(k)} * Wide{guard_weight});
+    const Torus guard_value = guard_value_for_parent_scale(k, kappa);
 
     alignas(64) TFHEpp::TLWE<typename BRP::targetP> guard;
     ethmsb_value<BRP>(guard, shifted, suffix_bits, kappa, guard_value, bkfft);
@@ -316,11 +344,9 @@ void ethmsb_value(TFHEpp::TLWE<typename BRP::targetP>& out,
     alignas(64) TFHEpp::TLWE<typename BRP::domainP> guarded;
     sub<typename BRP::domainP>(guarded, ct, guard);
 
-    const Torus final_offset =
-        static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                            Wide{delta(k)}) /
-                           Wide{2});
-    pbs_msb_value<BRP>(out, guarded, k, final_offset, out_value, bkfft);
+    pbs_msb_value<BRP>(out, guarded, k,
+                       gap_offset_for_current_layer(k, kappa), out_value,
+                       bkfft);
 }
 
 inline int ethmsb_pbs_count(const int k, const int kappa)

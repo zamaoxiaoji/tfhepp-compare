@@ -111,17 +111,16 @@ std::vector<PbsParamCase> build_param_cases()
     std::vector<PbsParamCase> cases;
     for (const int k : {1, 2, 3, 4, 5}) {
         for (const Torus out_value : {my_ethmsb::BOOL_ONE, Torus{1} << 58}) {
-            cases.push_back({k, 0, delta(k) / 2, out_value});
+            cases.push_back(
+                {k, 0, my_ethmsb::base_offset_for_current_layer(k),
+                 out_value});
         }
     }
     for (const int k : {6, 7, 8, 9, 12, 17, 25, 33}) {
         for (const int kappa : {4, 5}) {
             if (k <= kappa) continue;
-            const int w = k - kappa - 1;
             const Torus offset =
-                static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                                    Wide{delta(k)}) /
-                                   Wide{2});
+                my_ethmsb::gap_offset_for_current_layer(k, kappa);
             for (const Torus out_value :
                  {my_ethmsb::BOOL_ONE, Torus{1} << 58}) {
                 cases.push_back({k, kappa, offset, out_value});
@@ -157,8 +156,7 @@ std::vector<Torus> encrypted_messages(const PbsParamCase& pc)
     values.insert(Torus{1} << (pc.k - 1));
     values.insert((Torus{1} << pc.k) - 1);
     if (pc.kappa > 0) {
-        const int w = pc.k - pc.kappa - 1;
-        const Torus guard_weight = Torus{1} << w;
+        const Torus guard_weight = my_ethmsb::guard_weight(pc.k, pc.kappa);
         const Torus half = Torus{1} << (pc.k - 1);
         if (half > guard_weight) values.insert(half - guard_weight - 1);
         values.insert(half);

@@ -150,24 +150,21 @@ void strict_ethmsb(TFHEpp::TLWE<P2>& out, const TFHEpp::TLWE<P2>& in,
                    const Context& ctx)
 {
     if (k <= kappa) {
-        strict_pbs(out, in, delta(k) / 2, out_value, ctx);
+        strict_pbs(out, in, my_ethmsb::base_offset_for_current_layer(k),
+                   out_value, ctx);
         return;
     }
     TFHEpp::TLWE<P2> shifted;
     my_ethmsb::scalar_mul_pow2<P2>(shifted, in, kappa);
     const int suffix_bits = k - kappa;
-    const int w = k - kappa - 1;
     const Torus guard_value =
-        static_cast<Torus>(Wide{delta(k)} * Wide{Torus{1} << w});
+        my_ethmsb::guard_value_for_parent_scale(k, kappa);
     TFHEpp::TLWE<P2> guard;
     strict_ethmsb(guard, shifted, suffix_bits, kappa, guard_value, ctx);
     TFHEpp::TLWE<P2> guarded;
     my_ethmsb::sub<P2>(guarded, in, guard);
-    const Torus final_offset =
-        static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                            Wide{delta(k)}) /
-                           Wide{2});
-    strict_pbs(out, guarded, final_offset, out_value, ctx);
+    strict_pbs(out, guarded, my_ethmsb::gap_offset_for_current_layer(k, kappa),
+               out_value, ctx);
 }
 
 void strict_lt(TFHEpp::TLWE<P2>& out, const TFHEpp::TLWE<P2>& a,

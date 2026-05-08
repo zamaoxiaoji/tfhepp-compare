@@ -55,22 +55,19 @@ Torus choose_out_value(const int k, const std::string& mode)
     if (mode != "guard") throw std::runtime_error("unknown --out-value");
     if (k > 5) {
         constexpr int kappa = 5;
-        const int w = k - kappa - 1;
-        return static_cast<Torus>(Wide{delta(k)} * Wide{Torus{1} << w});
+        return my_ethmsb::guard_value_for_parent_scale(k, kappa);
     }
     return Torus{1} << 58;
 }
 
 PbsCase make_case(const int k, const std::string& out_value_mode)
 {
-    if (k <= 5) return {k, delta(k) / 2, choose_out_value(k, out_value_mode)};
+    if (k <= 5)
+        return {k, my_ethmsb::base_offset_for_current_layer(k),
+                choose_out_value(k, out_value_mode)};
     constexpr int kappa = 5;
-    const int w = k - kappa - 1;
-    const Torus offset =
-        static_cast<Torus>((Wide{(Torus{1} << w) + Torus{1}} *
-                            Wide{delta(k)}) /
-                           Wide{2});
-    return {k, offset, choose_out_value(k, out_value_mode)};
+    return {k, my_ethmsb::gap_offset_for_current_layer(k, kappa),
+            choose_out_value(k, out_value_mode)};
 }
 
 std::vector<int> parse_bits(const std::string& s)

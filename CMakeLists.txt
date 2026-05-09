@@ -345,6 +345,16 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_vs_he3db_test.cpp")
   target_compile_features(my_ethmsb_vs_he3db_test PRIVATE cxx_std_20)
 endif()
 
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_fast_test.cpp")
+  add_executable(my_ethmsb_pruned_fast_test EXCLUDE_FROM_ALL
+      my_ethmsb_pruned_fast_test.cpp
+      ethmsb.cpp)
+  target_include_directories(my_ethmsb_pruned_fast_test PRIVATE
+      ${PROJECT_SOURCE_DIR})
+  target_link_libraries(my_ethmsb_pruned_fast_test tfhe++)
+  target_compile_features(my_ethmsb_pruned_fast_test PRIVATE cxx_std_20)
+endif()
+
 if(ENABLE_TEST)
   add_subdirectory(test)
   add_subdirectory(thirdparties/AES)

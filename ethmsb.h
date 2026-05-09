@@ -13,6 +13,7 @@
  */
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include "cloudkey.hpp"
 #include "detwfa.hpp"
@@ -45,6 +46,32 @@ namespace ETHMSB_NS
     using TLWELvl2 = TFHEpp::TLWE<Lvl2>;
     using TFHEEvalKey  = TFHEpp::EvalKey;
     using TFHESecretKey = TFHEpp::SecretKey;
+
+    enum class PrunedETHMSBMode {
+        WeightedApprox,
+        PaperQHalf3PBS
+    };
+
+    struct PruneStats {
+        uint64_t total_terms = 0;
+        uint64_t zero_skipped = 0;
+        uint64_t periodic_skipped = 0;
+        uint64_t executed_terms = 0;
+
+        void Add(const PruneStats &other)
+        {
+            total_terms += other.total_terms;
+            zero_skipped += other.zero_skipped;
+            periodic_skipped += other.periodic_skipped;
+            executed_terms += other.executed_terms;
+        }
+    };
+
+    struct PrunedETHMSBOptions {
+        PrunedETHMSBMode mode = PrunedETHMSBMode::WeightedApprox;
+        uint32_t period_idx = 4;
+        uint32_t window_bits = 5;
+    };
 
     // ── Utility: μ polynomial ──
     template <class P>
@@ -125,6 +152,22 @@ namespace ETHMSB_NS
     void HomETHMSB(TLWELvl1 &res, const TLWELvl2 &tlwe,
                    uint32_t plain_bits, const TFHEEvalKey &ek,
                    bool result_type);
+
+    // ── Explicit fast/pruned path ──
+    // This is deliberately not wired into HomETHMSB. WeightedApprox is an
+    // experimental speed-first route; PaperQHalf3PBS keeps the Chapter 3
+    // 0/Q2 periodic LUT shape as an audit path.
+    void HomETHMSBPrunedFast(TLWELvl1 &res, const TLWELvl1 &tlwe,
+                             uint32_t plain_bits, const TFHEEvalKey &ek,
+                             bool result_type,
+                             const PrunedETHMSBOptions &options,
+                             PruneStats *stats = nullptr);
+
+    void HomETHMSBPrunedFast(TLWELvl1 &res, const TLWELvl2 &tlwe,
+                             uint32_t plain_bits, const TFHEEvalKey &ek,
+                             bool result_type,
+                             const PrunedETHMSBOptions &options,
+                             PruneStats *stats = nullptr);
 
     // ── ARI ↔ LOG conversion (re-implemented from HE3DB) ──
     void ARI_to_LOG(TLWELvl1 &res, const TLWELvl1 &tlwe,

@@ -20,6 +20,21 @@ namespace ETHMSB_NS
         HomETHMSB(res, sub_tlwe, plain_bits + 1, ek, result_type);
     }
 
+    template <typename P>
+    void greater_than_pruned_fast(TFHEpp::TLWE<P> &cipher1,
+                                  TFHEpp::TLWE<P> &cipher2,
+                                  TLWELvl1 &res, uint32_t plain_bits,
+                                  TFHEEvalKey &ek, bool result_type,
+                                  const PrunedETHMSBOptions &options,
+                                  PruneStats *stats = nullptr)
+    {
+        TFHEpp::TLWE<P> sub_tlwe;
+        for (size_t i = 0; i <= P::k * P::n; i++)
+            sub_tlwe[i] = cipher2[i] - cipher1[i];
+        HomETHMSBPrunedFast(res, sub_tlwe, plain_bits + 1, ek, result_type,
+                            options, stats);
+    }
+
     // cipher1 >= cipher2 ⟺ NOT(msb(cipher1 - cipher2))
     template <typename P>
     void greater_than_equal(TFHEpp::TLWE<P> &cipher1, TFHEpp::TLWE<P> &cipher2,

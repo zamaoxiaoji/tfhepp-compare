@@ -6,6 +6,8 @@
 #include <chrono>
 #include <random>
 #include <iomanip>
+#include <algorithm>
+#include <string>
 
 #include "ethmsb_compare.h"
 #include "hommsb_he3db_style.h"
@@ -20,8 +22,7 @@ void test_lvl1(uint32_t plain_bits, int num_test)
     std::cout << "\n=== Lvl1 Test  plain_bits=" << plain_bits
               << "  num_test=" << num_test << " ===" << std::endl;
 
-    std::random_device seed_gen;
-    std::default_random_engine engine(seed_gen());
+    std::mt19937_64 engine(0x4554484d53423100ULL + plain_bits);
     using P = TFHEpp::lvl1param;
 
     TFHEpp::SecretKey sk;
@@ -54,7 +55,14 @@ void test_lvl1(uint32_t plain_bits, int num_test)
         auto t1 = std::chrono::high_resolution_clock::now();
         he3db_time += std::chrono::duration<double, std::milli>(t1 - t0).count();
         auto d_he3db = TFHEpp::tlweSymDecrypt<P>(res_he3db, sk.key.lvl1);
-        if (d_he3db != expected_gt) he3db_err++;
+        if (d_he3db != expected_gt) {
+            he3db_err++;
+            if (he3db_err <= 5) {
+                std::cout << "  HE3DB fail p0=" << p0 << " p1=" << p1
+                          << " exp=" << expected_gt
+                          << " got=" << d_he3db << std::endl;
+            }
+        }
 
         // --- ETHMSB ---
         TFHEpp::TLWE<P> res_ethmsb;
@@ -64,7 +72,14 @@ void test_lvl1(uint32_t plain_bits, int num_test)
         t1 = std::chrono::high_resolution_clock::now();
         ethmsb_time += std::chrono::duration<double, std::milli>(t1 - t0).count();
         auto d_ethmsb = TFHEpp::tlweSymDecrypt<P>(res_ethmsb, sk.key.lvl1);
-        if (d_ethmsb != expected_gt) ethmsb_err++;
+        if (d_ethmsb != expected_gt) {
+            ethmsb_err++;
+            if (ethmsb_err <= 5) {
+                std::cout << "  ETHMSB fail p0=" << p0 << " p1=" << p1
+                          << " exp=" << expected_gt
+                          << " got=" << d_ethmsb << std::endl;
+            }
+        }
 
         if (t < 3) {
             std::cout << "  [" << t << "] p0=" << p0 << " p1=" << p1
@@ -93,8 +108,7 @@ void test_lvl2(uint32_t plain_bits, int num_test)
     std::cout << "\n=== Lvl2 Test  plain_bits=" << plain_bits
               << "  num_test=" << num_test << " ===" << std::endl;
 
-    std::random_device seed_gen;
-    std::default_random_engine engine(seed_gen());
+    std::mt19937_64 engine(0x4554484d53423200ULL + plain_bits);
     using P = TFHEpp::lvl2param;
 
     TFHEpp::SecretKey sk;
@@ -131,7 +145,14 @@ void test_lvl2(uint32_t plain_bits, int num_test)
         he3db_time += std::chrono::duration<double, std::milli>(t1 - t0).count();
         auto d_he3db = TFHEpp::tlweSymDecrypt<TFHEpp::lvl1param>(
             res_he3db, sk.key.lvl1);
-        if (d_he3db != expected_gt) he3db_err++;
+        if (d_he3db != expected_gt) {
+            he3db_err++;
+            if (he3db_err <= 5) {
+                std::cout << "  HE3DB fail p0=" << p0 << " p1=" << p1
+                          << " exp=" << expected_gt
+                          << " got=" << d_he3db << std::endl;
+            }
+        }
 
         // --- ETHMSB ---
         TFHEpp::TLWE<TFHEpp::lvl1param> res_ethmsb;
@@ -142,7 +163,14 @@ void test_lvl2(uint32_t plain_bits, int num_test)
         ethmsb_time += std::chrono::duration<double, std::milli>(t1 - t0).count();
         auto d_ethmsb = TFHEpp::tlweSymDecrypt<TFHEpp::lvl1param>(
             res_ethmsb, sk.key.lvl1);
-        if (d_ethmsb != expected_gt) ethmsb_err++;
+        if (d_ethmsb != expected_gt) {
+            ethmsb_err++;
+            if (ethmsb_err <= 5) {
+                std::cout << "  ETHMSB fail p0=" << p0 << " p1=" << p1
+                          << " exp=" << expected_gt
+                          << " got=" << d_ethmsb << std::endl;
+            }
+        }
 
         if (t < 3) {
             std::cout << "  [" << t << "] p0=" << p0 << " p1=" << p1
@@ -163,9 +191,10 @@ void test_lvl2(uint32_t plain_bits, int num_test)
               << " | " << speedup << "x |" << std::endl;
 }
 
-int main()
+int main(int argc, char **argv)
 {
     int num_test = 100;
+    if (argc > 1) num_test = std::max(1, std::stoi(argv[1]));
 
     std::cout << "========================================" << std::endl;
     std::cout << "  ETHMSB vs HE3DB Comparison Benchmark  " << std::endl;

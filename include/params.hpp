@@ -14,7 +14,9 @@ struct alignas(64) aligned_array : public std::array<T, N> {};
 enum class ErrorDistribution { ModularGaussian, CenteredBinomial };
 
 // Use old 80bit security parameters. It is faster, but not recommended.
-#if defined(USE_80BIT_SECURITY)
+#if defined(USE_HE3DB_COMPAT)
+#include "params/he3db_compat.hpp"
+#elif defined(USE_80BIT_SECURITY)
 #include "params/CGGI16.hpp"
 #elif defined(USE_COMPRESS)
 #include "params/compress.hpp"
@@ -173,11 +175,19 @@ template <class P>
 using BootstrappingKeyRAINTT =
     std::array<TRGSWRAINTT<typename P::targetP>, P::domainP::k * P::domainP::n>;
 
+#ifdef USE_HE3DB_COMPAT
+template <class P>
+using KeySwitchingKey = std::array<
+    std::array<std::array<TLWE<typename P::targetP>, (1 << P::basebit) - 1>,
+               P::t>,
+    P::domainP::k * P::domainP::n>;
+#else
 template <class P>
 using KeySwitchingKey = std::array<
     std::array<std::array<TLWE<typename P::targetP>, (1 << (P::basebit - 1))>,
                P::t>,
     P::domainP::k * P::domainP::n>;
+#endif
 template <class P>
 using SubsetKeySwitchingKey = std::array<
     std::array<std::array<TLWE<typename P::targetP>, (1 << P::basebit) - 1>,

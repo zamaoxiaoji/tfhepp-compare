@@ -19,6 +19,23 @@ struct lweKey {
     Key<lvl2param> lvl2;
     Key<lvl3param> lvl3;
     lweKey(){
+#ifdef USE_HE3DB_COMPAT
+        auto generate_hamming_secret_key = [](auto &key, int hwt) {
+            key.fill(0);
+            std::uniform_int_distribution<size_t> dist(0, key.size() - 1);
+            for (int i = 0; i < hwt; i++) key[dist(generator)] = 1;
+        };
+        generate_hamming_secret_key(lvl0, 512);
+        generate_hamming_secret_key(lvl1, 512);
+        generate_hamming_secret_key(lvl2, 1024);
+
+        std::uniform_int_distribution<int32_t> lvlhalfgen(
+            lvlhalfparam::key_value_min, lvlhalfparam::key_value_max);
+        std::uniform_int_distribution<int32_t> lvl3gen(lvl3param::key_value_min,
+                                                       lvl3param::key_value_max);
+        for (typename lvlhalfparam::T &i : lvlhalf) i = lvlhalfgen(generator);
+        for (typename lvl3param::T &i : lvl3) i = lvl3gen(generator);
+#else
         std::uniform_int_distribution<int32_t> lvl0gen(lvl0param::key_value_min,
                                                     lvl0param::key_value_max);
         std::uniform_int_distribution<int32_t> lvlhalfgen(
@@ -34,6 +51,7 @@ struct lweKey {
     #ifdef USE_SUBSET_KEY
         for (int i = 0; i < lvl1param::k * lvl1param::n; i++) lvl2[i] = lvl1[i];
     #endif
+#endif
     }
     template <class P>
     Key<P> get() const

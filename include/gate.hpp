@@ -6,7 +6,7 @@
 
 namespace TFHEpp {
 template <class brP, typename brP::targetP::T μ, class iksP, int casign,
-          int cbsign, std::make_signed_t<typename brP::domainP::T> offset>
+          int cbsign, int64_t offset>
 inline void HomGate(TLWE<typename iksP::targetP> &res,
                     const TLWE<typename brP::domainP> &ca,
                     const TLWE<typename brP::domainP> &cb, const EvalKey &ek)
@@ -18,7 +18,7 @@ inline void HomGate(TLWE<typename iksP::targetP> &res,
 }
 
 template <class iksP, class brP, typename brP::targetP::T μ, int casign,
-          int cbsign, std::make_signed_t<typename iksP::domainP::T> offset>
+          int cbsign, int64_t offset>
 inline void HomGate(TLWE<typename brP::targetP> &res,
                     const TLWE<typename iksP::domainP> &ca,
                     const TLWE<typename iksP::domainP> &cb, const EvalKey &ek)
@@ -97,7 +97,7 @@ void HomXNOR(TLWE<typename iksP::targetP> &res,
              const TLWE<typename brP::domainP> &ca,
              const TLWE<typename brP::domainP> &cb, const EvalKey &ek)
 {
-    HomGate<brP, μ, iksP, -2, -2, -2 * brP::domainP::μ>(res, ca, cb, ek);
+    HomGate<brP, μ, iksP, -2, -2, -2LL * brP::domainP::μ>(res, ca, cb, ek);
 }
 template <class iksP = lvl10param, class brP = lvl01param,
           typename brP::targetP::T μ = lvl1param::μ>
@@ -105,7 +105,7 @@ void HomXNOR(TLWE<typename brP::targetP> &res,
              const TLWE<typename iksP::domainP> &ca,
              const TLWE<typename iksP::domainP> &cb, const EvalKey &ek)
 {
-    HomGate<iksP, brP, μ, -2, -2, -2 * iksP::domainP::μ>(res, ca, cb, ek);
+    HomGate<iksP, brP, μ, -2, -2, -2LL * iksP::domainP::μ>(res, ca, cb, ek);
 }
 
 template <class brP = lvl01param, typename brP::targetP::T μ = lvl1param::μ,
@@ -148,7 +148,7 @@ void HomXOR(TLWE<typename iksP::targetP> &res,
             const TLWE<typename brP::domainP> &ca,
             const TLWE<typename brP::domainP> &cb, const EvalKey &ek)
 {
-    HomGate<brP, μ, iksP, 2, 2, 2 * brP::domainP::μ>(res, ca, cb, ek);
+    HomGate<brP, μ, iksP, 2, 2, 2LL * brP::domainP::μ>(res, ca, cb, ek);
 }
 template <class iksP = lvl10param, class brP = lvl01param,
           typename brP::targetP::T μ = lvl1param::μ>
@@ -156,7 +156,7 @@ void HomXOR(TLWE<typename brP::targetP> &res,
             const TLWE<typename iksP::domainP> &ca,
             const TLWE<typename iksP::domainP> &cb, const EvalKey &ek)
 {
-    HomGate<iksP, brP, μ, 2, 2, 2 * iksP::domainP::μ>(res, ca, cb, ek);
+    HomGate<iksP, brP, μ, 2, 2, 2LL * iksP::domainP::μ>(res, ca, cb, ek);
 }
 
 template <class brP = lvl01param, typename brP::targetP::T μ = lvl1param::μ,

@@ -194,6 +194,16 @@ void ikskgen(KeySwitchingKey<P>& ksk, const Key<typename P::domainP>& domainkey,
     for (int l = 0; l < P::domainP::k; l++)
         for (int i = 0; i < P::domainP::n; i++)
             for (int j = 0; j < P::t; j++)
+#ifdef USE_HE3DB_COMPAT
+                for (uint32_t k = 0; k < (1U << P::basebit) - 1; k++)
+                    ksk[l * P::domainP::n + i][j][k] =
+                        tlweSymEncrypt<typename P::targetP>(
+                            domainkey[l * P::domainP::n + i] * (k + 1) *
+                                (1ULL << (numeric_limits<
+                                              typename P::targetP::T>::digits -
+                                          (j + 1) * P::basebit)),
+                            P::α, targetkey);
+#else
                 for (uint32_t k = 0; k < 1U << (P::basebit - 1); k++)
                     ksk[l * P::domainP::n + i][j][k] =
                         tlweSymEncrypt<typename P::targetP>(
@@ -202,6 +212,7 @@ void ikskgen(KeySwitchingKey<P>& ksk, const Key<typename P::domainP>& domainkey,
                                               typename P::targetP::T>::digits -
                                           (j + 1) * P::basebit)),
                             targetkey);
+#endif
 }
 
 template <class P>

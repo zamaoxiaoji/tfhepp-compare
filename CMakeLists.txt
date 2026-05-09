@@ -19,6 +19,7 @@ option(USE_TFHE_RS "Use the parameter set proposed in TFHE-rs" OFF)
 option(USE_TERNARY "Use ternary secret keys" OFF)
 option(USE_COMPRESS "Use compressed ciphertexts" OFF)
 option(USE_SUBSET_KEY "Use subset key" OFF)
+option(USE_HE3DB_COMPAT "Use HE3DB-compatible parameters (lvl0 uint32_t, n=672)" OFF)
 
 option(USE_TERNARY_CMUX "Use ternary cmux" OFF)
 option(USE_KEY_BUNDLE "Use key bundle algorithm" OFF)
@@ -57,7 +58,12 @@ elseif(USE_RANDEN)
   add_compile_definitions(USE_RANDEN)
 endif()
 
-if(USE_80BIT_SECURITY)
+if(USE_HE3DB_COMPAT)
+  set(TFHEpp_DEFINITIONS
+      "${TFHEpp_DEFINITIONS};USE_HE3DB_COMPAT"
+      PARENT_SCOPE)
+  add_compile_definitions(USE_HE3DB_COMPAT)
+elseif(USE_80BIT_SECURITY)
   set(TFHEpp_DEFINITIONS
       "${TFHEpp_DEFINITIONS};USE_80BIT_SECURITY"
       PARENT_SCOPE)

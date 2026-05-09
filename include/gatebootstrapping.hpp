@@ -45,6 +45,29 @@ void BlindRotate(TRLWE<typename P::targetP> &res,
                  const BootstrappingKeyFFT<P> &bkfft,
                  const Polynomial<typename P::targetP> &testvector)
 {
+#ifdef USE_HE3DB_COMPAT
+    constexpr uint32_t bitwidth = bits_needed<num_out - 1>();
+    const uint32_t b_bar = 2 * P::targetP::n -
+                           ((tlwe[P::domainP::k * P::domainP::n] >>
+                             (std::numeric_limits<typename P::domainP::T>::digits -
+                              1 - P::targetP::nbit + bitwidth))
+                            << bitwidth);
+    res = {};
+    PolynomialMulByXai<typename P::targetP>(res[P::targetP::k], testvector,
+                                            b_bar);
+    for (int i = 0; i < P::domainP::k * P::domainP::n; i++) {
+        constexpr typename P::domainP::T roundoffset =
+            1ULL << (std::numeric_limits<typename P::domainP::T>::digits - 2 -
+                     P::targetP::nbit + bitwidth);
+        const uint32_t a_bar =
+            (tlwe[i] + roundoffset) >>
+            (std::numeric_limits<typename P::domainP::T>::digits - 1 -
+             P::targetP::nbit + bitwidth)
+                << bitwidth;
+        if (a_bar == 0) continue;
+        CMUXFFTwithPolynomialMulByXaiMinusOne<P>(res, bkfft[i], a_bar);
+    }
+#else
     ModswitchTLWE<typename P::domainP> moded;
     BRModSwitch<P,num_out>(moded, tlwe);
     res = {};
@@ -61,6 +84,7 @@ void BlindRotate(TRLWE<typename P::targetP> &res,
         // Do not use CMUXFFT to avoid unnecessary copy.
         CMUXFFTwithPolynomialMulByXaiMinusOne<P>(res, bkfft[i], moded[i]);
     }
+#endif
 #endif
 }
 

@@ -28,6 +28,40 @@ void IdentityKeySwitch(TLWE<typename P::targetP> &res,
                        const TLWE<typename P::domainP> &tlwe,
                        const KeySwitchingKey<P> &ksk)
 {
+#ifdef USE_HE3DB_COMPAT
+    constexpr typename P::domainP::T prec_offset =
+        1ULL << (std::numeric_limits<typename P::domainP::T>::digits -
+                 (1 + P::basebit * P::t));
+    constexpr uint32_t mask = (1U << P::basebit) - 1;
+    res = {};
+    constexpr uint32_t domain_digit =
+        std::numeric_limits<typename P::domainP::T>::digits;
+    constexpr uint32_t target_digit =
+        std::numeric_limits<typename P::targetP::T>::digits;
+    if constexpr (domain_digit == target_digit)
+        res[P::targetP::k * P::targetP::n] =
+            tlwe[P::domainP::k * P::domainP::n];
+    else if constexpr (domain_digit > target_digit)
+        res[P::targetP::k * P::targetP::n] =
+            (tlwe[P::domainP::k * P::domainP::n] +
+             (1ULL << (domain_digit - target_digit - 1))) >>
+            (domain_digit - target_digit);
+    else if constexpr (domain_digit < target_digit)
+        res[P::targetP::k * P::targetP::n] =
+            tlwe[P::domainP::k * P::domainP::n]
+            << (target_digit - domain_digit);
+    for (int i = 0; i < P::domainP::k * P::domainP::n; i++) {
+        const typename P::domainP::T aibar = tlwe[i] + prec_offset;
+        for (int j = 0; j < P::t; j++) {
+            const uint32_t aij =
+                (aibar >> (std::numeric_limits<typename P::domainP::T>::digits -
+                           (j + 1) * P::basebit)) &
+                mask;
+            if (aij != 0)
+                TLWESub<typename P::targetP>(res, res, ksk[i][j][aij - 1]);
+        }
+    }
+#else
     res = {};
     constexpr uint domain_digit =
         std::numeric_limits<typename P::domainP::T>::digits;
@@ -71,6 +105,7 @@ void IdentityKeySwitch(TLWE<typename P::targetP> &res,
                 TLWEAdd<typename P::targetP>(res, res, ksk[i][j][-aij - 1]);
         }
     }
+#endif
 }
 
 template <class P, uint numcat>

@@ -256,6 +256,67 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_he3db_style_tests.cpp")
                        my_ethmsb_he3db_style_tests.cpp)
 endif()
 
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_gapmsb_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_pruned_gapmsb_tests
+                       my_ethmsb_pruned_gapmsb_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_cmux_audit.cpp")
+  add_my_ethmsb_target(my_ethmsb_pruned_cmux_audit
+                       my_ethmsb_pruned_cmux_audit.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_margin_cert.cpp")
+  add_my_ethmsb_target(my_ethmsb_pruned_margin_cert
+                       my_ethmsb_pruned_margin_cert.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_failure_decomp.cpp")
+  add_my_ethmsb_target(my_ethmsb_pruned_failure_decomp
+                       my_ethmsb_pruned_failure_decomp.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_failure_sweep.cpp")
+  add_my_ethmsb_target(my_ethmsb_pruned_failure_sweep
+                       my_ethmsb_pruned_failure_sweep.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_gapmsb_bench_smoke.cpp")
+  add_my_ethmsb_target(my_ethmsb_pruned_gapmsb_bench_smoke
+                       my_ethmsb_pruned_gapmsb_bench_smoke.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_tex_claim_audit.cpp")
+  add_my_ethmsb_target(my_ethmsb_pruned_tex_claim_audit
+                       my_ethmsb_pruned_tex_claim_audit.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_direct_mask_periodicity_audit.cpp")
+  add_my_ethmsb_target(my_ethmsb_direct_mask_periodicity_audit
+                       my_ethmsb_direct_mask_periodicity_audit.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_fused_lut_truth_table_audit.cpp")
+  add_my_ethmsb_target(my_ethmsb_fused_lut_truth_table_audit
+                       my_ethmsb_fused_lut_truth_table_audit.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_fused_final_tests.cpp")
+  add_my_ethmsb_target(my_ethmsb_fused_final_tests
+                       my_ethmsb_fused_final_tests.cpp)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_fused_vs_conversion_ab.cpp")
+  add_my_ethmsb_target(my_ethmsb_fused_vs_conversion_ab
+                       my_ethmsb_fused_vs_conversion_ab.cpp)
+endif()
+
+if(EXISTS
+   "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_fused_final_bench_smoke.cpp")
+  add_my_ethmsb_target(my_ethmsb_pruned_fused_final_bench_smoke
+                       my_ethmsb_pruned_fused_final_bench_smoke.cpp)
+endif()
+
 if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_compare_he3db.cpp"
    AND EXISTS "${HE3DB_SOURCE_DIR}/HEDB/comparison/HomCompare.h")
   add_my_ethmsb_he3db_target(my_ethmsb_compare_he3db

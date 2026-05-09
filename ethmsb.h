@@ -71,6 +71,18 @@ namespace ETHMSB_NS
     void GuardBitExtractBS_Lvl2(TLWELvl2 &res, const TLWELvl2 &tlwe,
                                 Lvl2::T weight, const TFHEEvalKey &ek);
 
+    // ── Pruned Guard-bit extraction PBS (Chapter 3 optimization) ──
+    // Same as above but with periodic CMUX pruning:
+    // when ā_i ≡ 0 (mod Mk), the CMUX is identity → skip.
+    // Mk = 2^{shift} = 2^{plain_bits - κ} is the LUT period.
+    void PrunedGuardBitExtractBS_Lvl1(TLWELvl1 &res, const TLWELvl1 &tlwe,
+                                      Lvl1::T weight, uint32_t Mk,
+                                      const TFHEEvalKey &ek);
+
+    void PrunedGuardBitExtractBS_Lvl2(TLWELvl2 &res, const TLWELvl2 &tlwe,
+                                      Lvl2::T weight, uint32_t Mk,
+                                      const TFHEEvalKey &ek);
+
     // ── ETHMSB core: Lvl1 path ──
     // Base case: plain_bits <= 5
     void ETHMSB_ExtractMSB5(TLWELvl1 &res, const TLWELvl1 &tlwe,

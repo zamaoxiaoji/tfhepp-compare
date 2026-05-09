@@ -94,6 +94,103 @@ namespace ETHMSB_NS
     }
 
     // ══════════════════════════════════════════════════════════════
+    //  Pruned Blind Rotation (Chapter 3: periodic CMUX pruning)
+    //
+    //  Identical to TFHEpp::BlindRotate but adds one extra check:
+    //  if (ā % Mk == 0) continue;
+    //  This skips CMUX steps where the periodic LUT is invariant
+    //  under the rotation, i.e., Rot_{ā}(v) = v.
+    // ══════════════════════════════════════════════════════════════
+
+    template <class P>
+    static void PrunedBlindRotate(
+        TFHEpp::TRLWE<typename P::targetP> &res,
+        const TFHEpp::TLWE<typename P::domainP> &tlwe,
+        const TFHEpp::BootstrappingKeyFFT<P> &bkfft,
+        const TFHEpp::Polynomial<typename P::targetP> &testvector,
+        uint32_t Mk)
+    {
+        constexpr uint32_t bitwidth = TFHEpp::bits_needed<0>();
+        const uint32_t b_bar = 2 * P::targetP::n -
+            ((tlwe[P::domainP::k * P::domainP::n] >>
+              (std::numeric_limits<typename P::domainP::T>::digits -
+               1 - P::targetP::nbit + bitwidth))
+             << bitwidth);
+        res = {};
+        TFHEpp::PolynomialMulByXai<typename P::targetP>(
+            res[P::targetP::k], testvector, b_bar);
+
+        for (int i = 0; i < P::domainP::k * P::domainP::n; i++) {
+            constexpr typename P::domainP::T roundoffset =
+                1ULL << (std::numeric_limits<typename P::domainP::T>::digits -
+                         2 - P::targetP::nbit + bitwidth);
+            const uint32_t a_bar =
+                (tlwe[i] + roundoffset) >>
+                (std::numeric_limits<typename P::domainP::T>::digits -
+                 1 - P::targetP::nbit + bitwidth)
+                    << bitwidth;
+            if (a_bar == 0) continue;                        // standard: skip zero
+            if (Mk > 1 && (a_bar % Mk == 0)) continue;      // periodic pruning
+            TFHEpp::CMUXFFTwithPolynomialMulByXaiMinusOne<P>(
+                res, bkfft[i], a_bar);
+        }
+    }
+
+    // Pruned GateBootstrapping: PrunedBlindRotate + SampleExtract
+    template <class P>
+    static void PrunedGateBootstrappingTLWE2TLWEFFT(
+        TFHEpp::TLWE<typename P::targetP> &res,
+        const TFHEpp::TLWE<typename P::domainP> &tlwe,
+        const TFHEpp::BootstrappingKeyFFT<P> &bkfft,
+        const TFHEpp::Polynomial<typename P::targetP> &testvector,
+        uint32_t Mk)
+    {
+        alignas(64) TFHEpp::TRLWE<typename P::targetP> acc;
+        PrunedBlindRotate<P>(acc, tlwe, bkfft, testvector, Mk);
+        TFHEpp::SampleExtractIndex<typename P::targetP>(res, acc, 0);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  Pruned Guard-bit extraction PBS
+    // ══════════════════════════════════════════════════════════════
+
+    void PrunedGuardBitExtractBS_Lvl1(TLWELvl1 &res, const TLWELvl1 &tlwe,
+                                      Lvl1::T weight, uint32_t Mk,
+                                      const TFHEEvalKey &ek)
+    {
+        constexpr Lvl1::T offset =
+            17U * (1U << (std::numeric_limits<Lvl1::T>::digits - 6));
+
+        TLWELvl1 tlweoffset = tlwe;
+        tlweoffset[Lvl1::k * Lvl1::n] += offset;
+
+        TLWELvl0 tlwelvl0;
+        TFHEpp::IdentityKeySwitch<Lvl10>(tlwelvl0, tlweoffset, *ek.iksklvl10);
+
+        PrunedGateBootstrappingTLWE2TLWEFFT<Lvl01>(
+            res, tlwelvl0, *ek.bkfftlvl01, μ_polygen<Lvl1>(weight), Mk);
+        res[Lvl1::k * Lvl1::n] += weight;
+    }
+
+    void PrunedGuardBitExtractBS_Lvl2(TLWELvl2 &res, const TLWELvl2 &tlwe,
+                                      Lvl2::T weight, uint32_t Mk,
+                                      const TFHEEvalKey &ek)
+    {
+        constexpr Lvl2::T offset =
+            17ULL * (1ULL << (std::numeric_limits<Lvl2::T>::digits - 6));
+
+        TLWELvl2 tlweoffset = tlwe;
+        tlweoffset[Lvl2::k * Lvl2::n] += offset;
+
+        TLWELvl0 tlwelvl0;
+        TFHEpp::IdentityKeySwitch<Lvl20>(tlwelvl0, tlweoffset, *ek.iksklvl20);
+
+        PrunedGateBootstrappingTLWE2TLWEFFT<Lvl02>(
+            res, tlwelvl0, *ek.bkfftlvl02, μ_polygen<Lvl2>(weight), Mk);
+        res[Lvl2::k * Lvl2::n] += weight;
+    }
+
+    // ══════════════════════════════════════════════════════════════
     //  ETHMSB: Lvl1 path
     // ══════════════════════════════════════════════════════════════
 
@@ -105,7 +202,7 @@ namespace ETHMSB_NS
     }
 
     // Recursive: 5 < plain_bits ≤ 10
-    // Matches HE3DB's ExtractMSB9/ExtractMSB10 but with guard-bit approach
+    // Uses PRUNED guard-bit extraction (Chapter 3 optimization)
     void ETHMSB_ExtractMSB_Lvl1(TLWELvl1 &res, const TLWELvl1 &tlwe,
                                 uint32_t plain_bits, const TFHEEvalKey &ek,
                                 bool result_type)
@@ -123,11 +220,12 @@ namespace ETHMSB_NS
         for (size_t i = 0; i <= Lvl1::n; i++)
             shift_tlwe[i] = tlwe[i] << shift;
 
-        // Step 2: Guard-bit extraction PBS
-        // weight = 2^{shift-1} = the positional weight of b_κ
+        // Step 2: Pruned guard-bit extraction PBS
+        // weight = 2^{shift-1}, Mk = 2^shift (LUT period after shift)
         Lvl1::T weight = 1U << (shift - 1);
+        uint32_t Mk = 1U << shift;
         TLWELvl1 guard_bit;
-        GuardBitExtractBS_Lvl1(guard_bit, shift_tlwe, weight, ek);
+        PrunedGuardBitExtractBS_Lvl1(guard_bit, shift_tlwe, weight, Mk, ek);
 
         // Step 3: Subtract to zero the guard bit
         TLWELvl1 guarded;
@@ -159,7 +257,7 @@ namespace ETHMSB_NS
         ETHMSB_ExtractMSB_Lvl1(res, res, plain_bits, ek, result_type);
     }
 
-    // Helper: one ETHMSB guard-bit level on Lvl2, then delegate to next
+    // Helper: one ETHMSB guard-bit level on Lvl2 with PRUNING
     static void ethmsb_lvl2_one_level(TLWELvl2 &res_lvl2, const TLWELvl2 &tlwe,
                                       uint32_t plain_bits, const TFHEEvalKey &ek)
     {
@@ -171,10 +269,11 @@ namespace ETHMSB_NS
         for (size_t i = 0; i <= Lvl2::n; i++)
             shift_tlwe[i] = tlwe[i] << shift;
 
-        // Step 2: Guard-bit extraction
+        // Step 2: Pruned guard-bit extraction
         Lvl2::T weight = 1ULL << (shift - 1);
+        uint32_t Mk = 1U << shift;  // LUT period
         TLWELvl2 guard_bit;
-        GuardBitExtractBS_Lvl2(guard_bit, shift_tlwe, weight, ek);
+        PrunedGuardBitExtractBS_Lvl2(guard_bit, shift_tlwe, weight, Mk, ek);
 
         // Step 3: Subtract to zero guard bit
         for (size_t i = 0; i <= Lvl2::n; i++)

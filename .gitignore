@@ -10,6 +10,8 @@ samplepaper.tex
 build-128
 build-ethmsb-release
 reports/
+experimental/results/
+*.tar.gz
 Chapter_3_revised.tex
 .gitignore
 Meta-PBS.pdf

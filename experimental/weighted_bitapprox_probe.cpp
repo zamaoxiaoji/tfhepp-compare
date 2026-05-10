@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -9,12 +10,14 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <random>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -97,6 +100,7 @@ struct Args {
     uint32_t valid_seeds = 0;
     uint32_t test_seeds = 0;
     uint32_t preoffset_denominator = 8;
+    uint32_t threads = 0;
     bool summary_only = false;
     bool verbose = false;
     bool run_bad_candidates = false;
@@ -712,6 +716,7 @@ Args parse_args(int argc, char **argv)
         else if (key == "--valid-seeds") args.valid_seeds = static_cast<uint32_t>(std::stoul(need()));
         else if (key == "--test-seeds") args.test_seeds = static_cast<uint32_t>(std::stoul(need()));
         else if (key == "--preoffset-denominator") args.preoffset_denominator = static_cast<uint32_t>(std::stoul(need()));
+        else if (key == "--threads") args.threads = static_cast<uint32_t>(std::stoul(need()));
         else if (key == "--preoffset-cells8") {
             args.explicit_preoffsets = std::vector<int64_t>{};
             for (const auto &v : split(need())) args.explicit_preoffsets->push_back(std::stoll(v));
@@ -1077,6 +1082,22 @@ void seed_tfhe(uint64_t seed)
 #else
     (void) seed;
 #endif
+}
+
+std::mutex &tfhe_rng_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+template <class P>
+TFHEpp::TLWE<P> encrypt_with_seed(uint64_t phase, double alpha,
+                                  const TFHEpp::Key<P> &key, uint64_t seed)
+{
+    std::lock_guard<std::mutex> lock(tfhe_rng_mutex());
+    seed_tfhe(seed);
+    return TFHEpp::tlweSymEncrypt<P>(static_cast<typename P::T>(phase), alpha,
+                                     key);
 }
 
 template <class P>
@@ -1450,8 +1471,9 @@ int run_conversion_sanity(const Args &args, const TFHEpp::SecretKey &sk,
                 TFHEpp::TLWE<P2> qhalf;
                 const uint64_t nominal = bit ? kQHalf : 0;
                 if (input == InputMode::EncryptedNoisy)
-                    qhalf = TFHEpp::tlweSymEncrypt<P2>(nominal, P2::α,
-                                                       sk.key.lvl2);
+                    qhalf = encrypt_with_seed<P2>(
+                        nominal, P2::α, sk.key.lvl2,
+                        0xC0A70000ULL + seed * 17 + bit);
                 else
                     qhalf = make_controlled<P2>(
                         nominal, sk.key.lvl2,
@@ -1585,10 +1607,10 @@ CaseLog run_case(const Geometry &g, const Candidate &cand,
         const uint64_t bit_input_phase = static_cast<uint64_t>(
             static_cast<P0::T>(phase0_for_cell(m, g) + log.preoffset_hex));
         if (input == InputMode::EncryptedNoisy) {
-            seed_tfhe(0xE17E0000ULL + seed * 131 + m +
-                      static_cast<uint64_t>(cand.preoffset_numerator + 1024));
-            bit_in = TFHEpp::tlweSymEncrypt<P0>(
-                static_cast<P0::T>(bit_input_phase), P0::α, sk.key.lvl0);
+            bit_in = encrypt_with_seed<P0>(
+                bit_input_phase, P0::α, sk.key.lvl0,
+                0xE17E0000ULL + seed * 131 + m +
+                    static_cast<uint64_t>(cand.preoffset_numerator + 1024));
         }
         else {
             bit_in = make_controlled<P0>(bit_input_phase, sk.key.lvl0,
@@ -1670,9 +1692,9 @@ CaseLog run_case(const Geometry &g, const Candidate &cand,
 
     TFHEpp::TLWE<P2> orig;
     if (input == InputMode::EncryptedNoisy) {
-        seed_tfhe(0x0E160000ULL + seed * 257 + m);
-        orig = TFHEpp::tlweSymEncrypt<P2>(phase2_for_cell(m, g), P2::α,
-                                          sk.key.lvl2);
+        orig = encrypt_with_seed<P2>(phase2_for_cell(m, g), P2::α,
+                                     sk.key.lvl2,
+                                     0x0E160000ULL + seed * 257 + m);
     }
     else {
         orig = make_controlled<P2>(phase2_for_cell(m, g), sk.key.lvl2,
@@ -2086,6 +2108,62 @@ bool is_r0_baseline(const Candidate &cand)
            cand.preoffset_numerator == 0;
 }
 
+struct CaseTask {
+    PeriodInfo period;
+    Policy policy = Policy::TfheppV10Poly;
+    Pipeline pipeline = Pipeline::ConversionPbs;
+    BitSource source = BitSource::Pbs;
+    InputMode input = InputMode::ControlledZeroNoise;
+    uint64_t m = 0;
+    uint32_t seed = 0;
+};
+
+uint32_t effective_thread_count(const Args &args, size_t task_count)
+{
+    uint32_t n = args.threads;
+    if (n == 0) n = std::thread::hardware_concurrency();
+    if (n == 0) n = 1;
+    if (task_count != 0) n = std::min<uint32_t>(n, static_cast<uint32_t>(task_count));
+    return std::max<uint32_t>(1, n);
+}
+
+std::vector<CaseLog> run_tasks_parallel(
+    const Args &args, const Geometry &g, const Candidate &cand,
+    const FinalLut &final_lut, const std::vector<CaseTask> &tasks,
+    const TFHEpp::SecretKey &sk, const TFHEpp::EvalKey &ek)
+{
+    std::vector<CaseLog> logs(tasks.size());
+    if (tasks.empty()) return logs;
+    const uint32_t thread_count = effective_thread_count(args, tasks.size());
+    if (thread_count == 1) {
+        for (size_t i = 0; i < tasks.size(); i++) {
+            const CaseTask &t = tasks[i];
+            logs[i] = run_case(g, cand, t.period, final_lut, t.pipeline,
+                               t.source, t.input, t.policy, t.m, t.seed, sk,
+                               ek);
+        }
+        return logs;
+    }
+
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+    for (uint32_t tid = 0; tid < thread_count; tid++) {
+        workers.emplace_back([&]() {
+            for (;;) {
+                const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= tasks.size()) break;
+                const CaseTask &t = tasks[i];
+                logs[i] = run_case(g, cand, t.period, final_lut, t.pipeline,
+                                   t.source, t.input, t.policy, t.m, t.seed,
+                                   sk, ek);
+            }
+        });
+    }
+    for (std::thread &worker : workers) worker.join();
+    return logs;
+}
+
 void write_summary_file(const std::string &path,
                         const std::map<std::string, Summary> &summaries,
                         const std::map<int64_t, uint64_t> &kernel,
@@ -2312,6 +2390,7 @@ int run(const Args &args)
                               << " c383=" << final_lut.audit.c383
                               << " c384=" << final_lut.audit.c384 << "\n";
                 }
+                std::vector<CaseTask> tasks;
                 for (PeriodMode pmode : args.period_modes) {
                     const PeriodInfo period = make_period(pmode, g);
                     for (Policy policy : args.policies) {
@@ -2322,69 +2401,70 @@ int run(const Args &args)
                                         for (uint32_t seed = args.seed_start;
                                              seed < args.seed_start + args.seeds;
                                              seed++) {
-                                            CaseLog log = run_case(
-                                                g, cand, period, final_lut,
-                                                pipeline, source, input, policy,
-                                                m, seed, sk, ek);
-                                            if (args.mode == Mode::CollectKernel &&
-                                                !log.skipped_unsupported) {
-                                                kernel[log.selected_minus_nominal]++;
-                                            }
-                                            Summary tmp;
-                                            tmp.pipeline = log.pipeline;
-                                            tmp.cand = log.cand;
-                                            tmp.period = log.period;
-                                            tmp.policy = log.policy;
-                                            tmp.bit_source = log.bit_source;
-                                            tmp.input = log.input;
-                                            tmp.p = log.p;
-                                            tmp.k = log.k;
-                                            const std::string key =
-                                                summary_key(tmp);
-                                            absorb(summaries[key], log);
-                                            write_jsonl(jsonl, log);
-                                            if (do_paired) {
-                                                const std::string bkey =
-                                                    base_case_key(
-                                                        log.pipeline, log.p,
-                                                        log.k, log.period.mode,
-                                                        log.policy,
-                                                        log.bit_source,
-                                                        log.input, log.m,
-                                                        log.seed);
-                                                if (is_r0_baseline(log.cand)) {
-                                                    baselines[bkey] = log;
-                                                    const std::string pkey =
-                                                        pair_key(log);
-                                                    absorb_pair(paired[pkey],
-                                                                log, log);
-                                                    write_paired_jsonl(jsonl,
-                                                                       log, log);
-                                                }
-                                                else {
-                                                    const auto it =
-                                                        baselines.find(bkey);
-                                                    if (it != baselines.end()) {
-                                                        const std::string pkey =
-                                                            pair_key(log);
-                                                        absorb_pair(
-                                                            paired[pkey],
-                                                            it->second, log);
-                                                        write_paired_jsonl(
-                                                            jsonl, it->second,
-                                                            log);
-                                                    }
-                                                }
-                                            }
-                                            if (args.verbose &&
-                                                !args.summary_only)
-                                                print_case(log);
+                                            CaseTask task;
+                                            task.period = period;
+                                            task.policy = policy;
+                                            task.pipeline = pipeline;
+                                            task.source = source;
+                                            task.input = input;
+                                            task.m = m;
+                                            task.seed = seed;
+                                            tasks.push_back(task);
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                }
+                if (!args.summary_only) {
+                    std::cout << "running candidate=" << cand.name
+                              << " p=" << p << " k=" << kval
+                              << " tasks=" << tasks.size()
+                              << " threads="
+                              << effective_thread_count(args, tasks.size())
+                              << "\n";
+                }
+                std::vector<CaseLog> logs = run_tasks_parallel(
+                    args, g, cand, final_lut, tasks, sk, ek);
+                for (const CaseLog &log : logs) {
+                    if (args.mode == Mode::CollectKernel &&
+                        !log.skipped_unsupported) {
+                        kernel[log.selected_minus_nominal]++;
+                    }
+                    Summary tmp;
+                    tmp.pipeline = log.pipeline;
+                    tmp.cand = log.cand;
+                    tmp.period = log.period;
+                    tmp.policy = log.policy;
+                    tmp.bit_source = log.bit_source;
+                    tmp.input = log.input;
+                    tmp.p = log.p;
+                    tmp.k = log.k;
+                    const std::string key = summary_key(tmp);
+                    absorb(summaries[key], log);
+                    write_jsonl(jsonl, log);
+                    if (do_paired) {
+                        const std::string bkey = base_case_key(
+                            log.pipeline, log.p, log.k, log.period.mode,
+                            log.policy, log.bit_source, log.input, log.m,
+                            log.seed);
+                        if (is_r0_baseline(log.cand)) {
+                            baselines[bkey] = log;
+                            const std::string pkey = pair_key(log);
+                            absorb_pair(paired[pkey], log, log);
+                            write_paired_jsonl(jsonl, log, log);
+                        }
+                        else {
+                            const auto it = baselines.find(bkey);
+                            if (it != baselines.end()) {
+                                const std::string pkey = pair_key(log);
+                                absorb_pair(paired[pkey], it->second, log);
+                                write_paired_jsonl(jsonl, it->second, log);
+                            }
+                        }
+                    }
+                    if (args.verbose && !args.summary_only) print_case(log);
                 }
             }
         }

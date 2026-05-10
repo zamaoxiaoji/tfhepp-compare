@@ -1,9 +1,0 @@
-audit candidate=exact p=9 k=1 period_valid=1 negacyclic=1 semantic_diff=0 reachable=256 ambiguous=0 min_opp=129 c127=0 c128=0 c255=1 c256=1 c383=1 c384=1
-case candidate=exact bit_source=pbs input=controlled-zero-noise policy=tfhepp_v10_poly p=9 k=1 m=128 seed=0 period=full preoffset=0x0000000000000000 expected=0 actual=0 pass=1 failure_class=pass exact_bit=1 approx_nominal=1 approx_actual=0 bit_error_benign=1 bit_error_fatal=0 nominal_c=1024 selected_c=413 selected_minus_nominal=285 nearest_reachable=127 nearest_dist=1 min_opp=129 ambiguous=0 skipped_cmux=0 cmux_total=636 copied_vs_vendor_match=1
-# weighted_bitapprox summary
-
-## Candidate results
-
-|candidate|source|policy|p|k|period|cases|final_failures|exact_bit_failures|approx_bit_failures|benign_bit_errors|fatal_bit_errors|failure_reduction_vs_exact|skipped_cmux|cmux_total|avg_ms|min_opp|ambiguous|recommendation|
-|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-|exact|pbs|tfhepp_v10_poly|9|1|full|1|0|1|1|1|0|0|0|636|93.103|129|0|ablation|

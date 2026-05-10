@@ -1,0 +1,10 @@
+# conversion sanity
+
+conversion_cases=80
+conversion_failures=0
+guard0_mean_error_hex=0x00000001c0a2e199
+guardG_mean_error_hex=0x00000005c0698400
+worst_guard_error_hex=0x0000004143778000
+centered_lut_negacyclic_pass=1
+postadd_hex=0x2000000000000000
+G_hex=0x4000000000000000

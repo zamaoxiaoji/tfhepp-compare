@@ -355,6 +355,27 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/my_ethmsb_pruned_fast_test.cpp")
   target_compile_features(my_ethmsb_pruned_fast_test PRIVATE cxx_std_20)
 endif()
 
+if(EXISTS "${PROJECT_SOURCE_DIR}/experimental/weighted_bitapprox_probe.cpp")
+  add_executable(my_weighted_bitapprox_probe EXCLUDE_FROM_ALL
+      experimental/weighted_bitapprox_probe.cpp)
+  target_include_directories(my_weighted_bitapprox_probe PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(my_weighted_bitapprox_probe tfhe++)
+  target_compile_features(my_weighted_bitapprox_probe PRIVATE cxx_std_20)
+endif()
+
+if(EXISTS "${PROJECT_SOURCE_DIR}/experimental/weighted_bitapprox_probe.cpp")
+  add_executable(my_pruned_weightedapprox_full_pipeline_probe EXCLUDE_FROM_ALL
+      experimental/weighted_bitapprox_probe.cpp)
+  target_include_directories(my_pruned_weightedapprox_full_pipeline_probe PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(my_pruned_weightedapprox_full_pipeline_probe tfhe++)
+  target_compile_features(my_pruned_weightedapprox_full_pipeline_probe PRIVATE
+      cxx_std_20)
+endif()
+
 if(ENABLE_TEST)
   add_subdirectory(test)
   add_subdirectory(thirdparties/AES)

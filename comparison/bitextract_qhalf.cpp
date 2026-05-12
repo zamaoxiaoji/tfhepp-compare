@@ -123,7 +123,6 @@ namespace tfhepp_compare::bitextract_qhalf
         uint32_t period, bool pruned, Trace *trace)
     {
         res = {};
-#ifdef USE_HE3DB_COMPAT
         constexpr uint32_t bitwidth = TFHEpp::bits_needed<0>();
         const uint32_t br_index =
             2 * P::targetP::n -
@@ -131,17 +130,11 @@ namespace tfhepp_compare::bitextract_qhalf
               (std::numeric_limits<typename P::domainP::T>::digits - 1 -
                P::targetP::nbit + bitwidth))
              << bitwidth);
-#else
-        TFHEpp::ModswitchTLWE<typename P::domainP> moded;
-        TFHEpp::BRModSwitch<P, 1>(moded, tlwe);
-        const uint32_t br_index = moded[P::domainP::k * P::domainP::n];
-#endif
         TFHEpp::PolynomialMulByXai<typename P::targetP>(
             res[P::targetP::k], testvector, br_index);
         uint32_t skip_count = 0;
         uint32_t cmux_count = 0;
         for (int i = 0; i < P::domainP::k * P::domainP::n; i++) {
-#ifdef USE_HE3DB_COMPAT
             constexpr typename P::domainP::T roundoffset =
                 typename P::domainP::T(1)
                 << (std::numeric_limits<typename P::domainP::T>::digits - 2 -
@@ -151,9 +144,6 @@ namespace tfhepp_compare::bitextract_qhalf
                 (std::numeric_limits<typename P::domainP::T>::digits - 1 -
                  P::targetP::nbit + bitwidth)
                     << bitwidth;
-#else
-            const uint32_t a_bar = moded[i];
-#endif
             if (a_bar == 0) continue;
             if (pruned && period > 1 && (a_bar % period == 0)) {
                 skip_count++;
@@ -172,9 +162,7 @@ namespace tfhepp_compare::bitextract_qhalf
             trace->cmux_count = cmux_count;
             trace->period = period;
             trace->offset_used = BitExtractFloorOffsetLvl1();
-#ifdef USE_HE3DB_COMPAT
             trace->representative_mode = "he3db_compat_b_trunc_a_round";
-#endif
         }
     }
 
@@ -263,7 +251,6 @@ namespace tfhepp_compare::bitextract_qhalf
             static_cast<Lvl0::T>(static_cast<Lvl1::T>(message) * delta +
                                  center +
                                  BitExtractFloorOffsetLvl1());
-#ifdef USE_HE3DB_COMPAT
         constexpr uint32_t bitwidth = TFHEpp::bits_needed<0>();
         const uint32_t br_index =
             2 * Lvl1::n -
@@ -271,20 +258,13 @@ namespace tfhepp_compare::bitextract_qhalf
               (std::numeric_limits<Lvl0::T>::digits - 1 - Lvl1::nbit +
                bitwidth))
              << bitwidth);
-#else
-        TFHEpp::ModswitchTLWE<Lvl0> moded;
-        TFHEpp::BRModSwitch<Lvl01, 1>(moded, tlwe);
-        const uint32_t br_index = moded[Lvl0::k * Lvl0::n];
-#endif
         if (trace != nullptr) {
             trace->br_index = br_index;
             trace->modswitch_index = (2 * Lvl1::n - br_index) % (2 * Lvl1::n);
             trace->lut_index = trace->modswitch_index % period;
             trace->period = period;
             trace->offset_used = BitExtractFloorOffsetLvl1();
-#ifdef USE_HE3DB_COMPAT
             trace->representative_mode = "he3db_compat_b_trunc_a_round";
-#endif
             trace->bitextract_centering_enabled = centered_cell;
             trace->center_offset = center;
             trace->expected_nearest_message = message;

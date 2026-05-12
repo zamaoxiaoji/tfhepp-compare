@@ -50,7 +50,7 @@ namespace tfhepp_compare::bitextract_qhalf
         Lvl0::T phase_after_centering_and_iks = 0;
         int64_t signed_error_to_expected_center = 0;
         double signed_error_in_delta_units = 0.0;
-        const char *representative_mode = "floor_via_negative_roundoffset";
+        const char *representative_mode = "he3db_compat_b_trunc_a_round";
     };
 
     constexpr uint32_t WindowLocalPeriodLvl1(uint32_t window_local_k)
@@ -58,19 +58,9 @@ namespace tfhepp_compare::bitextract_qhalf
         return uint32_t(1) << (Lvl1::nbit + 1 - window_local_k);
     }
 
-    constexpr Lvl1::T Lvl01BRRoundOffset()
-    {
-        return Lvl1::T(1) << (std::numeric_limits<Lvl0::T>::digits - 2 -
-                              Lvl1::nbit);
-    }
-
     constexpr Lvl1::T BitExtractFloorOffsetLvl1()
     {
-#ifdef USE_HE3DB_COMPAT
         return Lvl1::T(0);
-#else
-        return Lvl1::T(0) - Lvl01BRRoundOffset();
-#endif
     }
 
     Lvl1::T ExpectedQHalfBit(uint64_t message, uint32_t p,

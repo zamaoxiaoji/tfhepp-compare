@@ -7,6 +7,7 @@ list(REMOVE_ITEM test_sources "bitextract_qhalf_boundary_probe.cpp")
 list(REMOVE_ITEM test_sources "micro_pbs_isolated_test.cpp")
 list(REMOVE_ITEM test_sources "micro_pbs_sweep_test.cpp")
 list(REMOVE_ITEM test_sources "micro_pbs_full_pipeline_test.cpp")
+list(REMOVE_ITEM test_sources "ckks_repack_interface_smoke.cpp")
 
 file(COPY test.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
 file(COPY show_info.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
@@ -76,6 +77,12 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/micro_pbs_full_pipeline_test.cpp" AND TARGE
     add_executable(micro_pbs_full_pipeline_test micro_pbs_full_pipeline_test.cpp)
     target_link_libraries(micro_pbs_full_pipeline_test tfhepp_compare tfhe++ AES)
     target_compile_features(micro_pbs_full_pipeline_test PRIVATE cxx_std_20)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/ckks_repack_interface_smoke.cpp" AND TARGET tfhepp_ckks_repack)
+    add_executable(ckks_repack_interface_smoke ckks_repack_interface_smoke.cpp)
+    target_link_libraries(ckks_repack_interface_smoke tfhepp_ckks_repack tfhe++)
+    target_compile_features(ckks_repack_interface_smoke PRIVATE cxx_std_20)
 endif()
 
 

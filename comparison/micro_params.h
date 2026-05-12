@@ -181,47 +181,27 @@ namespace tfhepp_compare::micro_pbs
     // GLWE degree remains N=1024 unless vendor FFT registry code is extended.
     struct micro_n64_N1024_l2_b8
         : MicroCandidateBase<MicroInParam<64>, Lvl1> {
-#ifdef USE_HE3DB_COMPAT
         static constexpr const char *name = "micro_n64_N1024_l3_b6";
-#else
-        static constexpr const char *name = "micro_n64_N1024_l2_b8";
-#endif
     };
 
     struct micro_n96_N1024_l2_b8
         : MicroCandidateBase<MicroInParam<96>, Lvl1> {
-#ifdef USE_HE3DB_COMPAT
         static constexpr const char *name = "micro_n96_N1024_l3_b6";
-#else
-        static constexpr const char *name = "micro_n96_N1024_l2_b8";
-#endif
     };
 
     struct micro_n128_N1024_l2_b8
         : MicroCandidateBase<MicroInParam<128>, Lvl1> {
-#ifdef USE_HE3DB_COMPAT
         static constexpr const char *name = "micro_n128_N1024_l3_b6";
-#else
-        static constexpr const char *name = "micro_n128_N1024_l2_b8";
-#endif
     };
 
     struct micro_n192_N1024_l2_b8
         : MicroCandidateBase<MicroInParam<192>, Lvl1> {
-#ifdef USE_HE3DB_COMPAT
         static constexpr const char *name = "micro_n192_N1024_l3_b6";
-#else
-        static constexpr const char *name = "micro_n192_N1024_l2_b8";
-#endif
     };
 
     struct micro_n256_N1024_l2_b8
         : MicroCandidateBase<MicroInParam<256>, Lvl1> {
-#ifdef USE_HE3DB_COMPAT
         static constexpr const char *name = "micro_n256_N1024_l3_b6";
-#else
-        static constexpr const char *name = "micro_n256_N1024_l2_b8";
-#endif
     };
 
     struct micro_n64_N1024_ahlvl1_l4_b5

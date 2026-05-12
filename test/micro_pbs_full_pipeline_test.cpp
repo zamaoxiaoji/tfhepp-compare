@@ -45,7 +45,7 @@ namespace
         int random_trials = 5000;
         int threads = 1;
         bool append = false;
-        bool centered_bitextract = false;
+        bool centered_bitextract = true;
         std::string jsonl_path =
             "experimental/results/micro_pbs_full_pipeline_summary.jsonl";
     };

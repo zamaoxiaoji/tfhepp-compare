@@ -38,7 +38,6 @@ namespace tfhepp_compare::three_pbs
         uint32_t period)
     {
         res = {};
-#ifdef USE_HE3DB_COMPAT
         const uint32_t br_index =
             2 * P::targetP::n -
             (tlwe[P::domainP::k * P::domainP::n] >>
@@ -60,20 +59,6 @@ namespace tfhepp_compare::three_pbs
             TFHEpp::CMUXFFTwithPolynomialMulByXaiMinusOne<P>(
                 res, bkfft[i], a_bar);
         }
-#else
-        TFHEpp::ModswitchTLWE<typename P::domainP> moded;
-        TFHEpp::BRModSwitch<P, 1>(moded, tlwe);
-        TFHEpp::PolynomialMulByXai<typename P::targetP>(
-            res[P::targetP::k], testvector,
-            moded[P::domainP::k * P::domainP::n]);
-        for (int i = 0; i < P::domainP::k * P::domainP::n; i++) {
-            const uint32_t a_bar = moded[i];
-            if (a_bar == 0) continue;
-            if (period > 1 && (a_bar % period == 0)) continue;
-            TFHEpp::CMUXFFTwithPolynomialMulByXaiMinusOne<P>(
-                res, bkfft[i], a_bar);
-        }
-#endif
     }
 
     template <class P>
@@ -116,12 +101,6 @@ namespace tfhepp_compare::three_pbs
     static typename P::T CenterOffset(uint32_t plain_bits)
     {
         return PhaseDelta<P>(plain_bits) >> 1;
-    }
-
-    static Lvl2::T BitExtractOffsetLvl2()
-    {
-        constexpr uint32_t digits = std::numeric_limits<Lvl2::T>::digits;
-        return Lvl2::T(1) << (digits - 7);
     }
 
     template <class P>
@@ -212,17 +191,8 @@ namespace tfhepp_compare::three_pbs
                                 const TFHEEvalKey &ek, uint32_t plain_bits,
                                 uint32_t window_local_k)
     {
-        // For the last Lvl2 guard round before the Lvl1 final gap PBS, the
-        // input already has enough BR resolution for κ=5.  Avoid multiplying
-        // its phase noise by the pre-scale factor; that was the source of the
-        // deterministic small-negative comparison failures.  Earlier, wider
-        // Lvl2 rounds keep pre-scaling to preserve high-bit resolution and the
-        // original pruning speed.
-        const bool near_final_lvl2_round = false;
         const uint32_t prescale_shift =
-            near_final_lvl2_round
-                ? 0
-                : BitExtractPreScaleShift<Lvl2>(plain_bits, window_local_k);
+            BitExtractPreScaleShift<Lvl2>(plain_bits, window_local_k);
         const uint32_t effective_plain_bits = plain_bits - prescale_shift;
         const uint32_t period =
             WindowLocalPeriod<Lvl2>(window_local_k, prescale_shift);
@@ -231,8 +201,8 @@ namespace tfhepp_compare::three_pbs
             for (size_t i = 0; i <= Lvl2::k * Lvl2::n; i++)
                 tlweoffset[i] <<= prescale_shift;
         }
-        (void) effective_plain_bits;
-        tlweoffset[Lvl2::k * Lvl2::n] += BitExtractOffsetLvl2();
+        tlweoffset[Lvl2::k * Lvl2::n] +=
+            CenterOffset<Lvl2>(effective_plain_bits);
 
         TLWELvl0 tlwelvl0;
         TFHEpp::IdentityKeySwitch<Lvl20>(tlwelvl0, tlweoffset, *ek.iksklvl20);

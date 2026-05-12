@@ -37,6 +37,7 @@ option(USE_HEXL "Use Intel HEXL" OFF)
 option(ENABLE_TEST "Build tests" OFF)
 option(ENABLE_BENCHMARK "Build benchmarks" OFF)
 option(ENABLE_TUTORIAL "Build tutorial" OFF)
+option(ENABLE_CKKS_REPACK "Build TFHEpp TLWE to SEAL CKKS repacking interface" OFF)
 option(USE_PERF "Use Google Profiler" OFF)
 
 option(ENABLE_SHARED "Build as shared libraries" OFF)
@@ -170,6 +171,29 @@ if(USE_RANDEN)
 endif()
 add_subdirectory(src)
 add_subdirectory(comparison)
+
+if(ENABLE_CKKS_REPACK)
+  set(HE3DB_ROOT
+      "${PROJECT_SOURCE_DIR}/../HE3DB"
+      CACHE PATH "HE3DB checkout used to provide vendored Microsoft SEAL")
+  if(NOT TARGET seal)
+    if(NOT EXISTS "${HE3DB_ROOT}/thirdparty/SEAL/CMakeLists.txt")
+      message(FATAL_ERROR "ENABLE_CKKS_REPACK requires HE3DB_ROOT with thirdparty/SEAL")
+    endif()
+    set(SEAL_USE_MSGSL OFF CACHE BOOL "" FORCE)
+    set(SEAL_USE_ZLIB OFF CACHE BOOL "" FORCE)
+    set(SEAL_USE_ZSTD OFF CACHE BOOL "" FORCE)
+    set(SEAL_USE_INTEL_HEXL OFF CACHE BOOL "" FORCE)
+    set(SEAL_BUILD_DEPS OFF CACHE BOOL "" FORCE)
+    set(SEAL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SEAL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(SEAL_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+    set(SEAL_BUILD_SEAL_C OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${HE3DB_ROOT}/thirdparty/SEAL"
+                     "${CMAKE_CURRENT_BINARY_DIR}/thirdparties/he3db-seal")
+  endif()
+  add_subdirectory(conversion)
+endif()
 
 
 if(ENABLE_TEST)

@@ -3,7 +3,7 @@
  * @brief Time + accuracy benchmark for the homomorphic comparison pipelines.
  *
  *   1) ethmsb     — ETHMSB + gap offset           (samplepaper.tex)
- *   2) three_pbs  — Pruned BitExtract + B2A + ETHMSB (Chapter 3)
+ *   2) three_pbs  — Pruned BitExtract + Micro-PBS B2A + ETHMSB (Chapter 3)
  *   3) HEDB       — HE3DB original HomMSB         (only when HE3DB sources are
  *                                                  available at ../HE3DB/src)
  *
@@ -269,7 +269,7 @@ namespace
         std::uniform_int_distribution<typename P::T> message(
             0, (typename P::T(1) << (plain_bits - 1)) - 1);
 
-        AlgoMetrics ethmsb_m, three_pbs_legacy_m, three_pbs_m;
+        AlgoMetrics ethmsb_m, three_pbs_m;
 #if HAVE_HE3DB_ORIGINAL
         AlgoMetrics he3db_m;
 #endif
@@ -281,8 +281,7 @@ namespace
             TFHEpp::TLWE<P> c1 = tlweSymInt32Encrypt<P>(
                 p1, P::α, std::pow(2., scale_bits), sk.key.get<P>());
 
-            RUN_ALGO_TRIAL(ethmsb,    ethmsb_m);
-            RUN_ALGO_TRIAL(three_pbs, three_pbs_legacy_m);
+            RUN_ALGO_TRIAL(ethmsb, ethmsb_m);
             run_three_pbs_micro_trial<P>(three_pbs_m, c0, c1, p0, p1,
                                          plain_bits, ek, micro_pack, sk);
 #if HAVE_HE3DB_ORIGINAL
@@ -291,9 +290,7 @@ namespace
         }
 
         print_results("ETHMSB+offset    (samplepaper)", ethmsb_m, num_test);
-        print_results("Pruned 3-PBS+LegacyB2A        ", three_pbs_legacy_m,
-                      num_test);
-        print_results("Pruned 3-PBS+MicroPBS         ", three_pbs_m, num_test);
+        print_results("Pruned 3-PBS optimized        ", three_pbs_m, num_test);
 #if HAVE_HE3DB_ORIGINAL
         print_results("HE3DB HomMSB     (original)   ", he3db_m, num_test);
 #endif
@@ -321,7 +318,7 @@ namespace
         std::uniform_int_distribution<typename P::T> message(
             0, (typename P::T(1) << (plain_bits - 1)) - 1);
 
-        AlgoMetrics ethmsb_m, three_pbs_legacy_m, three_pbs_m;
+        AlgoMetrics ethmsb_m, three_pbs_m;
 #if HAVE_HE3DB_ORIGINAL
         AlgoMetrics he3db_m;
 #endif
@@ -333,8 +330,7 @@ namespace
             TFHEpp::TLWE<P> c1 = tlweSymInt32Encrypt<P>(
                 p1, P::α, std::pow(2., scale_bits), sk.key.get<P>());
 
-            RUN_ALGO_TRIAL(ethmsb,    ethmsb_m);
-            RUN_ALGO_TRIAL(three_pbs, three_pbs_legacy_m);
+            RUN_ALGO_TRIAL(ethmsb, ethmsb_m);
             run_three_pbs_micro_trial<P>(three_pbs_m, c0, c1, p0, p1,
                                          plain_bits, ek, micro_pack, sk);
 #if HAVE_HE3DB_ORIGINAL
@@ -343,9 +339,7 @@ namespace
         }
 
         print_results("ETHMSB+offset    (samplepaper)", ethmsb_m, num_test);
-        print_results("Pruned 3-PBS+LegacyB2A        ", three_pbs_legacy_m,
-                      num_test);
-        print_results("Pruned 3-PBS+MicroPBS         ", three_pbs_m, num_test);
+        print_results("Pruned 3-PBS optimized        ", three_pbs_m, num_test);
 #if HAVE_HE3DB_ORIGINAL
         print_results("HE3DB HomMSB     (original)   ", he3db_m, num_test);
 #endif
@@ -361,7 +355,7 @@ int main(int argc, char **argv)
     if (argc >= 2) num_test = std::stoi(argv[1]);
 
     std::cout << "TFHEpp comparison benchmark\n";
-    std::cout << "  Algorithms: ETHMSB+offset, Pruned 3-PBS";
+    std::cout << "  Algorithms: ETHMSB+offset, Pruned 3-PBS optimized";
 #if HAVE_HE3DB_ORIGINAL
     std::cout << ", HE3DB HomMSB";
 #else

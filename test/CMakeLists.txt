@@ -8,6 +8,8 @@ list(REMOVE_ITEM test_sources "micro_pbs_isolated_test.cpp")
 list(REMOVE_ITEM test_sources "micro_pbs_sweep_test.cpp")
 list(REMOVE_ITEM test_sources "micro_pbs_full_pipeline_test.cpp")
 list(REMOVE_ITEM test_sources "pruned_three_pbs_targeted_probe.cpp")
+list(REMOVE_ITEM test_sources "pruned_three_pbs_kappa_sweep.cpp")
+list(REMOVE_ITEM test_sources "pruned_bitclear_lsb_sweep.cpp")
 list(REMOVE_ITEM test_sources "ckks_repack_interface_smoke.cpp")
 
 file(COPY test.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
@@ -84,6 +86,18 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/pruned_three_pbs_targeted_probe.cpp" AND TA
     add_executable(pruned_three_pbs_targeted_probe pruned_three_pbs_targeted_probe.cpp)
     target_link_libraries(pruned_three_pbs_targeted_probe tfhepp_compare tfhe++ AES)
     target_compile_features(pruned_three_pbs_targeted_probe PRIVATE cxx_std_20)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/pruned_three_pbs_kappa_sweep.cpp" AND TARGET tfhepp_compare)
+    add_executable(pruned_three_pbs_kappa_sweep pruned_three_pbs_kappa_sweep.cpp)
+    target_link_libraries(pruned_three_pbs_kappa_sweep tfhepp_compare tfhe++ AES)
+    target_compile_features(pruned_three_pbs_kappa_sweep PRIVATE cxx_std_20)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/pruned_bitclear_lsb_sweep.cpp" AND TARGET tfhepp_compare)
+    add_executable(pruned_bitclear_lsb_sweep pruned_bitclear_lsb_sweep.cpp)
+    target_link_libraries(pruned_bitclear_lsb_sweep tfhepp_compare tfhe++ AES)
+    target_compile_features(pruned_bitclear_lsb_sweep PRIVATE cxx_std_20)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/ckks_repack_interface_smoke.cpp" AND TARGET tfhepp_ckks_repack)

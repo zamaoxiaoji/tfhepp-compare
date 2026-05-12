@@ -92,4 +92,24 @@ namespace tfhepp_compare::three_pbs
                 const TFHEEvalKey &ek, const FastB2AEvalKeyPack &micro_pack,
                 bool result_type);
 
+    void HomMSBWithKappa(TLWELvl1 &res, const TLWELvl1 &tlwe,
+                         uint32_t plain_bits, uint32_t kappa,
+                         const TFHEEvalKey &ek, bool result_type);
+
+    void HomMSBWithKappa(TLWELvl1 &res, const TLWELvl2 &tlwe,
+                         uint32_t plain_bits, uint32_t kappa,
+                         const TFHEEvalKey &ek, bool result_type);
+
+    void HomMSBWithKappa(TLWELvl1 &res, const TLWELvl1 &tlwe,
+                         uint32_t plain_bits, uint32_t kappa,
+                         const TFHEEvalKey &ek,
+                         const FastB2AEvalKeyPack &micro_pack,
+                         bool result_type);
+
+    void HomMSBWithKappa(TLWELvl1 &res, const TLWELvl2 &tlwe,
+                         uint32_t plain_bits, uint32_t kappa,
+                         const TFHEEvalKey &ek,
+                         const FastB2AEvalKeyPack &micro_pack,
+                         bool result_type);
+
 } // namespace tfhepp_compare::three_pbs

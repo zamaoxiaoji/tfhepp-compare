@@ -137,26 +137,40 @@ namespace tfhepp_compare::three_pbs
         return WindowLocalPeriod<P>(window_local_k) << prescale_shift;
     }
 
-    static Lvl1::T GapOffsetLvl1(uint32_t guarded_plain_bits)
+    static void ValidateKappa(uint32_t kappa)
     {
-        constexpr uint32_t kappa = 5;
+        if (kappa < 1 || kappa > 8)
+            throw std::invalid_argument("Pruned3PBS: kappa must be in [1,8].");
+    }
+
+    template <class T>
+    static T GuardWeight(uint32_t kappa)
+    {
+        constexpr uint32_t digits = std::numeric_limits<T>::digits;
+        if (kappa + 2 >= digits)
+            throw std::invalid_argument("Pruned3PBS: kappa too large.");
+        return T(1) << (digits - kappa - 2);
+    }
+
+    static Lvl1::T GapOffsetLvl1(uint32_t guarded_plain_bits, uint32_t kappa)
+    {
         const uint32_t digits = std::numeric_limits<Lvl1::T>::digits;
         if (guarded_plain_bits <= kappa + 1 || guarded_plain_bits >= digits)
-            return Lvl1::T(1) << (digits - 6);
-        return (Lvl1::T(1) << (digits - kappa - 2)) +
+            return Lvl1::T(1) << (digits - kappa - 1);
+        return GuardWeight<Lvl1::T>(kappa) +
                (Lvl1::T(1) << (digits - guarded_plain_bits - 1));
     }
 
     static void GapMSBGateBootstrapping(TLWELvl1 &res, const TLWELvl1 &tlwe,
                                         uint32_t guarded_plain_bits,
-                                        const TFHEEvalKey &ek,
+                                        uint32_t kappa, const TFHEEvalKey &ek,
                                         bool result_type)
     {
         Lvl1::T mu = Lvl1::μ;
         if (IS_ARITHMETIC(result_type)) mu = mu << 1;
         TLWELvl1 tlweoffset = tlwe;
         tlweoffset[Lvl1::k * Lvl1::n] +=
-            GapOffsetLvl1(guarded_plain_bits);
+            GapOffsetLvl1(guarded_plain_bits, kappa);
 
         TLWELvl0 tlwelvl0;
         TFHEpp::IdentityKeySwitch<Lvl10>(tlwelvl0, tlweoffset, *ek.iksklvl10);
@@ -249,12 +263,13 @@ namespace tfhepp_compare::three_pbs
 
     static void Boolean2Weight_Lvl1_Fast(
         TLWELvl1 &res, const TLWELvl1 &boolean_bit, Lvl1::T A,
-        const TFHEEvalKey &ek, const FastB2AEvalKeyPack *micro_pack)
+        uint32_t kappa, const TFHEEvalKey &ek,
+        const FastB2AEvalKeyPack *micro_pack)
     {
         const Lvl1::T guard_value = A << 1;
         if (micro_pack != nullptr) {
             const micro_pbs::MicroUnsafeBestPlan plan =
-                micro_pbs::SelectMicroUnsafeBestPlan(5);
+                micro_pbs::SelectMicroUnsafeBestPlan(kappa);
             if (plan.supported) {
                 micro_pbs::MicroUnsafeKsPreQHalfToGuardValue_Lvl1<
                     FastB2ALvl1Candidate>(res, boolean_bit, guard_value,
@@ -269,11 +284,13 @@ namespace tfhepp_compare::three_pbs
 
     static void Boolean2Weight_Lvl2_Fast(
         TLWELvl2 &res, const TLWELvl2 &boolean_bit, Lvl2::T A,
-        const TFHEEvalKey &ek, const FastB2AEvalKeyPack *micro_pack)
+        uint32_t kappa, const TFHEEvalKey &ek,
+        const FastB2AEvalKeyPack *micro_pack)
     {
         if (micro_pack != nullptr && micro_pack->lvl2 != nullptr) {
             constexpr uint32_t digits = std::numeric_limits<Lvl2::T>::digits;
-            constexpr Lvl2::T offset = Lvl2::T(1) << (digits - 5);
+            const Lvl2::T offset =
+                Lvl2::T(1) << (digits - (kappa <= 6 ? 5 : 4));
             const Lvl2::T guard_value = A << 1;
             micro_pbs::MicroUnsafeKsPreQHalfToGuardValue_Lvl2<
                 FastB2ALvl2Candidate>(res, boolean_bit, guard_value, offset,
@@ -292,16 +309,16 @@ namespace tfhepp_compare::three_pbs
                                          const TFHEEvalKey &ek,
                                          const FastB2AEvalKeyPack *micro_pack,
                                          bool result_type,
-                                         uint32_t gap_parent_bits)
+                                         uint32_t gap_parent_bits,
+                                         uint32_t kappa)
     {
-        constexpr uint32_t kappa = 5;
         const bool gap_allows_early_final =
             gap_parent_bits != 0 && plain_bits <= kappa + 3;
         if (plain_bits <= kappa || gap_allows_early_final) {
             if (gap_parent_bits == 0)
                 MSBGateBootstrapping(res, tlwe, plain_bits, ek, result_type);
             else
-                GapMSBGateBootstrapping(res, tlwe, gap_parent_bits, ek,
+                GapMSBGateBootstrapping(res, tlwe, gap_parent_bits, kappa, ek,
                                         result_type);
             return;
         }
@@ -314,11 +331,10 @@ namespace tfhepp_compare::three_pbs
         BitExtract_Lvl1(boolean_bit, tlwe, ek, plain_bits, kappa);
 
         // Step 2 (PBS #2): convert boolean → weighted ciphertext.
-        constexpr Lvl1::T A =
-            Lvl1::T(1) << (std::numeric_limits<Lvl1::T>::digits - kappa - 2);
+        const Lvl1::T A = GuardWeight<Lvl1::T>(kappa);
         TLWELvl1 weight_bit;
         if (micro_pack != nullptr)
-            Boolean2Weight_Lvl1_Fast(weight_bit, boolean_bit, A, ek,
+            Boolean2Weight_Lvl1_Fast(weight_bit, boolean_bit, A, kappa, ek,
                                      micro_pack);
         else
             Boolean2Weight_Lvl1(weight_bit, boolean_bit, A, ek);
@@ -329,22 +345,22 @@ namespace tfhepp_compare::three_pbs
             guarded[i] = tlwe[i] - weight_bit[i];
 
         three_pbs_lvl1_recursive(res, guarded, plain_bits - kappa, ek,
-                                 micro_pack, result_type, plain_bits);
+                                 micro_pack, result_type, plain_bits, kappa);
     }
 
     static void three_pbs_lvl2_one_level(TLWELvl2 &out, const TLWELvl2 &tlwe,
                                          uint32_t plain_bits,
                                          const TFHEEvalKey &ek,
-                                         const FastB2AEvalKeyPack *micro_pack)
+                                         const FastB2AEvalKeyPack *micro_pack,
+                                         uint32_t kappa)
     {
-        constexpr uint32_t kappa = 5;
         TLWELvl2 boolean_bit;
         BitExtract_Lvl2(boolean_bit, tlwe, ek, plain_bits, kappa);
 
-        constexpr Lvl2::T A =
-            Lvl2::T(1) << (std::numeric_limits<Lvl2::T>::digits - kappa - 2);
+        const Lvl2::T A = GuardWeight<Lvl2::T>(kappa);
         TLWELvl2 weight_bit;
-        Boolean2Weight_Lvl2_Fast(weight_bit, boolean_bit, A, ek, micro_pack);
+        Boolean2Weight_Lvl2_Fast(weight_bit, boolean_bit, A, kappa, ek,
+                                 micro_pack);
 
         for (size_t i = 0; i <= Lvl2::n; i++)
             out[i] = tlwe[i] - weight_bit[i];
@@ -355,13 +371,13 @@ namespace tfhepp_compare::three_pbs
                                         const TFHEEvalKey &ek,
                                         const FastB2AEvalKeyPack *micro_pack,
                                         bool result_type,
-                                        uint32_t gap_parent_bits)
+                                        uint32_t gap_parent_bits,
+                                        uint32_t kappa)
     {
-        constexpr uint32_t kappa = 5;
         if (gap_parent_bits != 0 && plain_bits <= kappa + 9) {
             TFHEpp::IdentityKeySwitch<Lvl21>(res, tlwe, *ek.iksklvl21);
             three_pbs_lvl1_recursive(res, res, plain_bits, ek, micro_pack,
-                                     result_type, gap_parent_bits);
+                                     result_type, gap_parent_bits, kappa);
             return;
         }
         if (plain_bits <= 6) {
@@ -369,20 +385,21 @@ namespace tfhepp_compare::three_pbs
             if (gap_parent_bits == 0)
                 MSBGateBootstrapping(res, res, plain_bits, ek, result_type);
             else
-                GapMSBGateBootstrapping(res, res, gap_parent_bits, ek,
+                GapMSBGateBootstrapping(res, res, gap_parent_bits, kappa, ek,
                                         result_type);
             return;
         }
-        if (plain_bits <= 9) {
+        if (plain_bits <= std::min<uint32_t>(10, kappa + 4)) {
             TFHEpp::IdentityKeySwitch<Lvl21>(res, tlwe, *ek.iksklvl21);
             three_pbs_lvl1_recursive(res, res, plain_bits, ek, micro_pack,
-                                     result_type, gap_parent_bits);
+                                     result_type, gap_parent_bits, kappa);
             return;
         }
         TLWELvl2 guarded;
-        three_pbs_lvl2_one_level(guarded, tlwe, plain_bits, ek, micro_pack);
-        three_pbs_lvl2_dispatch(res, guarded, plain_bits - 5, ek, micro_pack,
-                                result_type, plain_bits);
+        three_pbs_lvl2_one_level(guarded, tlwe, plain_bits, ek, micro_pack,
+                                 kappa);
+        three_pbs_lvl2_dispatch(res, guarded, plain_bits - kappa, ek,
+                                micro_pack, result_type, plain_bits, kappa);
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -398,123 +415,147 @@ namespace tfhepp_compare::three_pbs
     void ExtractMSB10(TLWELvl1 &res, const TLWELvl1 &tlwe, uint32_t plain_bits,
                       const TFHEEvalKey &ek, bool result_type)
     {
-        three_pbs_lvl1_recursive(res, tlwe, plain_bits, ek, nullptr,
-                                 result_type, 0);
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
     }
 
     void ImExtractMSB5(TLWELvl1 &res, const TLWELvl2 &tlwe, uint32_t plain_bits,
                        const TFHEEvalKey &ek, bool result_type)
     {
         (void) plain_bits;
-        three_pbs_lvl2_dispatch(res, tlwe, 5, ek, nullptr, result_type, 0);
+        HomMSBWithKappa(res, tlwe, 5, 5, ek, result_type);
     }
 
     void ImExtractMSB9(TLWELvl1 &res, const TLWELvl2 &tlwe, uint32_t plain_bits,
                        const TFHEEvalKey &ek, bool result_type)
     {
-        three_pbs_lvl2_dispatch(res, tlwe, plain_bits, ek, nullptr, result_type,
-                                0);
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
     }
 
     void ImExtractMSB14(TLWELvl1 &res, const TLWELvl2 &tlwe,
                         uint32_t plain_bits, const TFHEEvalKey &ek,
                         bool result_type)
     {
-        three_pbs_lvl2_dispatch(res, tlwe, plain_bits, ek, nullptr, result_type,
-                                0);
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
     }
 
     void ImExtractMSB19(TLWELvl1 &res, const TLWELvl2 &tlwe,
                         uint32_t plain_bits, const TFHEEvalKey &ek,
                         bool result_type)
     {
-        three_pbs_lvl2_dispatch(res, tlwe, plain_bits, ek, nullptr, result_type,
-                                0);
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
     }
 
     void ImExtractMSB24(TLWELvl1 &res, const TLWELvl2 &tlwe,
                         uint32_t plain_bits, const TFHEEvalKey &ek,
                         bool result_type)
     {
-        three_pbs_lvl2_dispatch(res, tlwe, plain_bits, ek, nullptr, result_type,
-                                0);
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
     }
 
     void ImExtractMSB29(TLWELvl1 &res, const TLWELvl2 &tlwe,
                         uint32_t plain_bits, const TFHEEvalKey &ek,
                         bool result_type)
     {
-        three_pbs_lvl2_dispatch(res, tlwe, plain_bits, ek, nullptr, result_type,
-                                0);
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
     }
 
     void ImExtractMSB33(TLWELvl1 &res, const TLWELvl2 &tlwe,
                         uint32_t plain_bits, const TFHEEvalKey &ek,
                         bool result_type)
     {
-        three_pbs_lvl2_dispatch(res, tlwe, plain_bits, ek, nullptr, result_type,
-                                0);
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
     }
 
     void HomMSB(TLWELvl1 &res, const TLWELvl1 &tlwe, uint32_t plain_bits,
                 const TFHEEvalKey &ek, bool result_type)
     {
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
+    }
+
+    void HomMSB(TLWELvl1 &res, const TLWELvl2 &tlwe, uint32_t plain_bits,
+                const TFHEEvalKey &ek, bool result_type)
+    {
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, result_type);
+    }
+
+    void HomMSB(TLWELvl1 &res, const TLWELvl1 &tlwe, uint32_t plain_bits,
+                const TFHEEvalKey &ek, const FastB2AEvalKeyPack &micro_pack,
+                bool result_type)
+    {
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, micro_pack, result_type);
+    }
+
+    void HomMSB(TLWELvl1 &res, const TLWELvl2 &tlwe, uint32_t plain_bits,
+                const TFHEEvalKey &ek, const FastB2AEvalKeyPack &micro_pack,
+                bool result_type)
+    {
+        HomMSBWithKappa(res, tlwe, plain_bits, 5, ek, micro_pack, result_type);
+    }
+
+    void HomMSBWithKappa(TLWELvl1 &res, const TLWELvl1 &tlwe,
+                         uint32_t plain_bits, uint32_t kappa,
+                         const TFHEEvalKey &ek, bool result_type)
+    {
+        ValidateKappa(kappa);
         if (plain_bits <= 6)
             MSBGateBootstrapping(res, tlwe, plain_bits, ek, result_type);
         else if (plain_bits <= 10)
-            ExtractMSB10(res, tlwe, plain_bits, ek, result_type);
+            three_pbs_lvl1_recursive(res, tlwe, plain_bits, ek, nullptr,
+                                     result_type, 0, kappa);
         else
             throw std::invalid_argument(
                 "Pruned3PBS: Lvl1 plain_bits out of range (max 10).");
     }
 
-    void HomMSB(TLWELvl1 &res, const TLWELvl2 &tlwe, uint32_t plain_bits,
-                const TFHEEvalKey &ek, bool result_type)
+    void HomMSBWithKappa(TLWELvl1 &res, const TLWELvl2 &tlwe,
+                         uint32_t plain_bits, uint32_t kappa,
+                         const TFHEEvalKey &ek, bool result_type)
     {
-        if (plain_bits <= 6)
-            ImExtractMSB5(res, tlwe, plain_bits, ek, result_type);
-        else if (plain_bits <= 9)
-            ImExtractMSB9(res, tlwe, plain_bits, ek, result_type);
-        else if (plain_bits <= 14)
-            ImExtractMSB14(res, tlwe, plain_bits, ek, result_type);
-        else if (plain_bits <= 19)
-            ImExtractMSB19(res, tlwe, plain_bits, ek, result_type);
-        else if (plain_bits <= 24)
-            ImExtractMSB24(res, tlwe, plain_bits, ek, result_type);
-        else if (plain_bits <= 29)
-            ImExtractMSB29(res, tlwe, plain_bits, ek, result_type);
-        else if (plain_bits <= 33)
-            ImExtractMSB33(res, tlwe, plain_bits, ek, result_type);
+        ValidateKappa(kappa);
+        if (plain_bits <= 6) {
+            TFHEpp::IdentityKeySwitch<Lvl21>(res, tlwe, *ek.iksklvl21);
+            MSBGateBootstrapping(res, res, plain_bits, ek, result_type);
+        }
+        else if (plain_bits <= 33) {
+            three_pbs_lvl2_dispatch(res, tlwe, plain_bits, ek, nullptr,
+                                    result_type, 0, kappa);
+        }
         else
             throw std::invalid_argument(
                 "Pruned3PBS: Lvl2 plain_bits out of range (max 33).");
     }
 
-    void HomMSB(TLWELvl1 &res, const TLWELvl1 &tlwe, uint32_t plain_bits,
-                const TFHEEvalKey &ek, const FastB2AEvalKeyPack &micro_pack,
-                bool result_type)
+    void HomMSBWithKappa(TLWELvl1 &res, const TLWELvl1 &tlwe,
+                         uint32_t plain_bits, uint32_t kappa,
+                         const TFHEEvalKey &ek,
+                         const FastB2AEvalKeyPack &micro_pack,
+                         bool result_type)
     {
+        ValidateKappa(kappa);
         if (plain_bits <= 6)
             MSBGateBootstrapping(res, tlwe, plain_bits, ek, result_type);
         else if (plain_bits <= 10)
             three_pbs_lvl1_recursive(res, tlwe, plain_bits, ek, &micro_pack,
-                                     result_type, 0);
+                                     result_type, 0, kappa);
         else
             throw std::invalid_argument(
                 "Pruned3PBS+MicroPBS: Lvl1 plain_bits out of range (max 10).");
     }
 
-    void HomMSB(TLWELvl1 &res, const TLWELvl2 &tlwe, uint32_t plain_bits,
-                const TFHEEvalKey &ek, const FastB2AEvalKeyPack &micro_pack,
-                bool result_type)
+    void HomMSBWithKappa(TLWELvl1 &res, const TLWELvl2 &tlwe,
+                         uint32_t plain_bits, uint32_t kappa,
+                         const TFHEEvalKey &ek,
+                         const FastB2AEvalKeyPack &micro_pack,
+                         bool result_type)
     {
+        ValidateKappa(kappa);
         if (plain_bits <= 6) {
             TFHEpp::IdentityKeySwitch<Lvl21>(res, tlwe, *ek.iksklvl21);
             MSBGateBootstrapping(res, res, plain_bits, ek, result_type);
         }
         else if (plain_bits <= 33) {
             three_pbs_lvl2_dispatch(res, tlwe, plain_bits, ek, &micro_pack,
-                                    result_type, 0);
+                                    result_type, 0, kappa);
         }
         else {
             throw std::invalid_argument(

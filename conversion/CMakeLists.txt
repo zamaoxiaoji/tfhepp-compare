@@ -1,4 +1,7 @@
-add_library(tfhepp_ckks_repack STATIC ckks_repack.cpp)
+add_library(tfhepp_ckks_repack STATIC
+    ckks_repack.cpp
+    ckks_relational.cpp
+    ckks_rns_masks.cpp)
 
 target_include_directories(tfhepp_ckks_repack PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})

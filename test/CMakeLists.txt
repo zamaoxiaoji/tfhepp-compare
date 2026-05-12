@@ -11,6 +11,8 @@ list(REMOVE_ITEM test_sources "pruned_three_pbs_targeted_probe.cpp")
 list(REMOVE_ITEM test_sources "pruned_three_pbs_kappa_sweep.cpp")
 list(REMOVE_ITEM test_sources "pruned_bitclear_lsb_sweep.cpp")
 list(REMOVE_ITEM test_sources "ckks_repack_interface_smoke.cpp")
+list(REMOVE_ITEM test_sources "ckks_relational_ops_test.cpp")
+list(REMOVE_ITEM test_sources "ckks_rns_masks_test.cpp")
 
 file(COPY test.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
 file(COPY show_info.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
@@ -104,6 +106,18 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/ckks_repack_interface_smoke.cpp" AND TARGET
     add_executable(ckks_repack_interface_smoke ckks_repack_interface_smoke.cpp)
     target_link_libraries(ckks_repack_interface_smoke tfhepp_ckks_repack tfhe++)
     target_compile_features(ckks_repack_interface_smoke PRIVATE cxx_std_20)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/ckks_relational_ops_test.cpp" AND TARGET tfhepp_ckks_repack)
+    add_executable(ckks_relational_ops_test ckks_relational_ops_test.cpp)
+    target_link_libraries(ckks_relational_ops_test tfhepp_ckks_repack tfhe++)
+    target_compile_features(ckks_relational_ops_test PRIVATE cxx_std_20)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/ckks_rns_masks_test.cpp" AND TARGET tfhepp_ckks_repack)
+    add_executable(ckks_rns_masks_test ckks_rns_masks_test.cpp)
+    target_link_libraries(ckks_rns_masks_test tfhepp_ckks_repack tfhe++)
+    target_compile_features(ckks_rns_masks_test PRIVATE cxx_std_20)
 endif()
 
 

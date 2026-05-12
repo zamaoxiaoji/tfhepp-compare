@@ -118,7 +118,11 @@ namespace tfhepp_compare::three_pbs
                 ? plain_bits - (window_local_k + 1)
                 : 0;
         const uint32_t base_period = WindowLocalPeriod<P>(window_local_k);
-        const uint32_t max_period = 2 * P::n;
+        // A {0,Q/2} LUT is invariant under negation, so a period-2N step
+        // cannot be represented by the negacyclic polynomial: the implicit
+        // [N,2N) half is just the negation of [0,N). Keep the expanded
+        // BitExtract plateau within N slots.
+        const uint32_t max_period = P::n;
         uint32_t max_shift = 0;
         while (max_shift < desired &&
                base_period <= (max_period >> (max_shift + 1)))
@@ -354,13 +358,7 @@ namespace tfhepp_compare::three_pbs
                                         uint32_t gap_parent_bits)
     {
         constexpr uint32_t kappa = 5;
-        if (micro_pack != nullptr && plain_bits > 6) {
-            TFHEpp::IdentityKeySwitch<Lvl21>(res, tlwe, *ek.iksklvl21);
-            three_pbs_lvl1_recursive(res, res, plain_bits, ek, micro_pack,
-                                     result_type, gap_parent_bits);
-            return;
-        }
-        if (gap_parent_bits != 0 && plain_bits <= kappa + 23) {
+        if (gap_parent_bits != 0 && plain_bits <= kappa + 9) {
             TFHEpp::IdentityKeySwitch<Lvl21>(res, tlwe, *ek.iksklvl21);
             three_pbs_lvl1_recursive(res, res, plain_bits, ek, micro_pack,
                                      result_type, gap_parent_bits);

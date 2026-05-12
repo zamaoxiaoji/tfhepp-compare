@@ -133,10 +133,10 @@ namespace tfhepp_compare::ethmsb
                                      const TFHEEvalKey &ek, bool result_type,
                                      uint32_t gap_parent_bits)
     {
-        if (plain_bits <= 5) {
+        if (plain_bits <= 6) {
             TFHEpp::IdentityKeySwitch<Lvl21>(res, tlwe, *ek.iksklvl21);
             if (gap_parent_bits == 0)
-                MSBGateBootstrapping(res, res, ek, result_type);
+                MSBGateBootstrapping(res, res, plain_bits, ek, result_type);
             else
                 GapMSBGateBootstrapping(res, res, gap_parent_bits, ek,
                                         result_type);
@@ -161,7 +161,7 @@ namespace tfhepp_compare::ethmsb
     void ExtractMSB5(TLWELvl1 &res, const TLWELvl1 &tlwe,
                      const TFHEEvalKey &ek, bool result_type)
     {
-        MSBGateBootstrapping(res, tlwe, ek, result_type);
+        MSBGateBootstrapping(res, tlwe, 5, ek, result_type);
     }
 
     void ExtractMSB10(TLWELvl1 &res, const TLWELvl1 &tlwe, uint32_t plain_bits,
@@ -222,7 +222,8 @@ namespace tfhepp_compare::ethmsb
     void HomMSB(TLWELvl1 &res, const TLWELvl1 &tlwe, uint32_t plain_bits,
                 const TFHEEvalKey &ek, bool result_type)
     {
-        if (plain_bits <= 5) ExtractMSB5(res, tlwe, ek, result_type);
+        if (plain_bits <= 6)
+            MSBGateBootstrapping(res, tlwe, plain_bits, ek, result_type);
         else if (plain_bits <= 10)
             ExtractMSB10(res, tlwe, plain_bits, ek, result_type);
         else
@@ -233,7 +234,7 @@ namespace tfhepp_compare::ethmsb
     void HomMSB(TLWELvl1 &res, const TLWELvl2 &tlwe, uint32_t plain_bits,
                 const TFHEEvalKey &ek, bool result_type)
     {
-        if (plain_bits <= 5)
+        if (plain_bits <= 6)
             ImExtractMSB5(res, tlwe, plain_bits, ek, result_type);
         else if (plain_bits <= 9)
             ImExtractMSB9(res, tlwe, plain_bits, ek, result_type);

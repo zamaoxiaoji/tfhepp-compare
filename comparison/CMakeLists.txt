@@ -4,7 +4,9 @@
 add_library(tfhepp_compare STATIC
     tfhepp_utils.cpp
     ethmsb.cpp
-    pruned_three_pbs.cpp)
+    bitextract_qhalf.cpp
+    pruned_three_pbs.cpp
+    micro_pbs.cpp)
 
 target_include_directories(tfhepp_compare PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})

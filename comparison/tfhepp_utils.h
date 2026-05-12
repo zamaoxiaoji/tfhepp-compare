@@ -103,9 +103,18 @@ namespace tfhepp_compare
 
     // ── Building-block PBSes shared by both algorithms ──
 
-    // Direct PBS-MSB at level 1 / level 2 (κ-bit reliable window).
+    // Direct PBS-MSB at level 1 / level 2.  The overloads that take
+    // plain_bits use the cell-center offset for that signed-difference width.
+    void MSBGateBootstrapping(TLWELvl1 &res, const TLWELvl1 &tlwe,
+                              uint32_t plain_bits, const TFHEEvalKey &ek,
+                              bool result_type);
+
     void MSBGateBootstrapping(TLWELvl1 &res, const TLWELvl1 &tlwe,
                               const TFHEEvalKey &ek, bool result_type);
+
+    void MSBGateBootstrapping(TLWELvl2 &res, const TLWELvl2 &tlwe,
+                              uint32_t plain_bits, const TFHEEvalKey &ek,
+                              bool result_type);
 
     void MSBGateBootstrapping(TLWELvl2 &res, const TLWELvl2 &tlwe,
                               const TFHEEvalKey &ek, bool result_type);

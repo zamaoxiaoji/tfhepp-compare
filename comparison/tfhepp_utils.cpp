@@ -2,16 +2,24 @@
 
 namespace tfhepp_compare
 {
+    template <class P>
+    static typename P::T CenterOffsetForPlainBits(uint32_t plain_bits)
+    {
+        constexpr uint32_t digits = std::numeric_limits<typename P::T>::digits;
+        if (plain_bits + 1 >= digits) return typename P::T(0);
+        return typename P::T(1) << (digits - plain_bits - 1);
+    }
+
     // ── MSBGateBootstrapping ──
     void MSBGateBootstrapping(TLWELvl1 &res, const TLWELvl1 &tlwe,
-                              const TFHEEvalKey &ek, bool result_type)
+                              uint32_t plain_bits, const TFHEEvalKey &ek,
+                              bool result_type)
     {
         Lvl1::T μ = Lvl1::μ;
         if (IS_ARITHMETIC(result_type)) μ = μ << 1;
-        constexpr uint64_t offset =
-            1ULL << (std::numeric_limits<Lvl1::T>::digits - 6);
         TLWELvl1 tlweoffset = tlwe;
-        tlweoffset[Lvl1::k * Lvl1::n] += offset;
+        tlweoffset[Lvl1::k * Lvl1::n] +=
+            CenterOffsetForPlainBits<Lvl1>(plain_bits);
         TLWELvl0 tlwelvl0;
         TFHEpp::IdentityKeySwitch<Lvl10>(tlwelvl0, tlweoffset, *ek.iksklvl10);
         TFHEpp::GateBootstrappingTLWE2TLWEFFT<Lvl01>(
@@ -19,20 +27,32 @@ namespace tfhepp_compare
         if (IS_ARITHMETIC(result_type)) res[Lvl1::k * Lvl1::n] += μ;
     }
 
-    void MSBGateBootstrapping(TLWELvl2 &res, const TLWELvl2 &tlwe,
+    void MSBGateBootstrapping(TLWELvl1 &res, const TLWELvl1 &tlwe,
                               const TFHEEvalKey &ek, bool result_type)
+    {
+        MSBGateBootstrapping(res, tlwe, 5, ek, result_type);
+    }
+
+    void MSBGateBootstrapping(TLWELvl2 &res, const TLWELvl2 &tlwe,
+                              uint32_t plain_bits, const TFHEEvalKey &ek,
+                              bool result_type)
     {
         Lvl2::T μ = Lvl2::μ;
         if (IS_ARITHMETIC(result_type)) μ = μ << 1;
-        constexpr uint64_t offset =
-            1ULL << (std::numeric_limits<Lvl2::T>::digits - 7);
         TLWELvl2 tlweoffset = tlwe;
-        tlweoffset[Lvl2::k * Lvl2::n] += offset;
+        tlweoffset[Lvl2::k * Lvl2::n] +=
+            CenterOffsetForPlainBits<Lvl2>(plain_bits);
         TLWELvl0 tlwelvl0;
         TFHEpp::IdentityKeySwitch<Lvl20>(tlwelvl0, tlweoffset, *ek.iksklvl20);
         TFHEpp::GateBootstrappingTLWE2TLWEFFT<Lvl02>(
             res, tlwelvl0, *ek.bkfftlvl02, μ_polygen<Lvl2>(μ));
         if (IS_ARITHMETIC(result_type)) res[Lvl2::k * Lvl2::n] += μ;
+    }
+
+    void MSBGateBootstrapping(TLWELvl2 &res, const TLWELvl2 &tlwe,
+                              const TFHEEvalKey &ek, bool result_type)
+    {
+        MSBGateBootstrapping(res, tlwe, 6, ek, result_type);
     }
 
     // ── IdeGateBootstrapping (identity rounding) ──

@@ -2,9 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <stdexcept>
 #include <string>
+
+#include <Eigen/Dense>
 
 namespace tfhepp_ckks
 {
@@ -168,45 +169,27 @@ namespace tfhepp_ckks
             ValidateSquareMatrix(matrix, "InvertMatrix");
 
             const std::size_t n = matrix.size();
-            DenseMatrix augmented(n, std::vector<double>(2 * n, 0.0));
+            Eigen::MatrixXd eigen_matrix(n, n);
             for (std::size_t row = 0; row < n; ++row) {
                 for (std::size_t col = 0; col < n; ++col)
-                    augmented[row][col] = matrix[row][col];
-                augmented[row][n + row] = 1.0;
+                    eigen_matrix(static_cast<Eigen::Index>(row),
+                                 static_cast<Eigen::Index>(col)) =
+                        matrix[row][col];
             }
 
-            for (std::size_t col = 0; col < n; ++col) {
-                std::size_t pivot = col;
-                double pivot_abs = std::abs(augmented[col][col]);
-                for (std::size_t row = col + 1; row < n; ++row) {
-                    const double candidate = std::abs(augmented[row][col]);
-                    if (candidate > pivot_abs) {
-                        pivot = row;
-                        pivot_abs = candidate;
-                    }
-                }
-                if (pivot_abs <= std::numeric_limits<double>::epsilon())
-                    throw std::invalid_argument(
-                        "InvertMatrix: singular basis matrix");
+            Eigen::FullPivLU<Eigen::MatrixXd> lu(eigen_matrix);
+            if (!lu.isInvertible())
+                throw std::invalid_argument(
+                    "InvertMatrix: singular basis matrix");
 
-                if (pivot != col) std::swap(augmented[pivot], augmented[col]);
-
-                const double pivot_value = augmented[col][col];
-                for (double &value : augmented[col]) value /= pivot_value;
-
-                for (std::size_t row = 0; row < n; ++row) {
-                    if (row == col) continue;
-                    const double factor = augmented[row][col];
-                    if (factor == 0.0) continue;
-                    for (std::size_t k = 0; k < 2 * n; ++k)
-                        augmented[row][k] -= factor * augmented[col][k];
-                }
-            }
+            const Eigen::MatrixXd inverse_matrix = lu.inverse();
 
             DenseMatrix inverse(n, std::vector<double>(n, 0.0));
             for (std::size_t row = 0; row < n; ++row)
                 for (std::size_t col = 0; col < n; ++col)
-                    inverse[row][col] = augmented[row][n + col];
+                    inverse[row][col] =
+                        inverse_matrix(static_cast<Eigen::Index>(row),
+                                       static_cast<Eigen::Index>(col));
             return inverse;
         }
     } // namespace

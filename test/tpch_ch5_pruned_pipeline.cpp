@@ -104,6 +104,7 @@ namespace
     enum class CkksProfile {
         He3dbQ6,
         Relational,
+        JoinSmoke,
         DeepJoin,
     };
 
@@ -114,6 +115,8 @@ namespace
             return "he3db_q6";
         case CkksProfile::Relational:
             return "relational";
+        case CkksProfile::JoinSmoke:
+            return "join_smoke";
         case CkksProfile::DeepJoin:
             return "deep_join";
         }
@@ -818,10 +821,23 @@ namespace
                             45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
                             45, 45, 45, 45, 45, 59});
             }
+            if (profile == CkksProfile::JoinSmoke) {
+                return tfhepp_ckks::MakeDefaultCKKSParameters(
+                    65536, {59, 42, 42, 42, 42, 42, 42, 42, 45, 45,
+                            45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
+                            45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
+                            45, 59});
+            }
             std::vector<int> coeff_modulus_bits{60};
             coeff_modulus_bits.insert(coeff_modulus_bits.end(), 35, 45);
             return tfhepp_ckks::MakeDefaultCKKSParameters(
                 65536, coeff_modulus_bits);
+        }
+
+        static double MakeScale(CkksProfile profile)
+        {
+            return profile == CkksProfile::He3dbQ6 ? std::pow(2.0, 45)
+                                                   : std::pow(2.0, 40);
         }
 
         explicit CkksEnv(CkksProfile profile = CkksProfile::DeepJoin)
@@ -834,7 +850,8 @@ namespace
               symmetric_encryptor(context, secret_key),
               decryptor(context, secret_key),
               evaluator(context),
-              encoder(context)
+              encoder(context),
+              scale(MakeScale(profile))
         {
             keygen.create_relin_keys(relin_keys);
             keygen.create_galois_keys(RotationSteps(encoder.slot_count()),
@@ -1350,6 +1367,8 @@ namespace
             return CkksProfile::He3dbQ6;
         if (opts.query == "q14")
             return CkksProfile::Relational;
+        if (opts.query == "q3" || opts.query == "q5")
+            return CkksProfile::JoinSmoke;
         return CkksProfile::DeepJoin;
     }
 

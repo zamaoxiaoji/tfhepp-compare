@@ -18,6 +18,13 @@
 
 namespace tfhepp_compare::micro_pbs
 {
+    constexpr double Pow2AsDouble(std::uint32_t exponent)
+    {
+        double value = 1.0;
+        for (std::uint32_t i = 0; i < exponent; i++) value *= 2.0;
+        return value;
+    }
+
     template <std::uint32_t N>
     struct MicroNBit;
 
@@ -50,7 +57,7 @@ namespace tfhepp_compare::micro_pbs
         static constexpr std::make_signed_t<T> μ = 1 << 29;
         static constexpr std::uint32_t plain_modulus = 8;
         static constexpr double Δ =
-            std::ldexp(1.0, std::numeric_limits<T>::digits) / plain_modulus;
+            Pow2AsDouble(std::numeric_limits<T>::digits) / plain_modulus;
     };
 
     template <std::uint32_t NIn, int AlphaLog2 = -60>
@@ -67,7 +74,7 @@ namespace tfhepp_compare::micro_pbs
         static constexpr std::make_signed_t<T> μ = Lvl2::μ;
         static constexpr std::uint32_t plain_modulus = Lvl2::plain_modulus;
         static constexpr double Δ =
-            std::ldexp(1.0, std::numeric_limits<T>::digits) / plain_modulus;
+            Pow2AsDouble(std::numeric_limits<T>::digits) / plain_modulus;
     };
 
     template <std::uint32_t NOut, std::uint32_t Level,
@@ -92,8 +99,7 @@ namespace tfhepp_compare::micro_pbs
         static constexpr std::make_signed_t<T> μ = 1 << 29;
         static constexpr std::uint32_t plain_modulus = 8;
         static constexpr double Δ =
-            static_cast<double>(1ULL << std::numeric_limits<T>::digits) /
-            plain_modulus;
+            Pow2AsDouble(std::numeric_limits<T>::digits) / plain_modulus;
     };
 
     template <class DomainP, class TargetP>

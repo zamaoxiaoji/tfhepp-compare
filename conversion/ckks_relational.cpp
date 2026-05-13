@@ -44,12 +44,10 @@ namespace tfhepp_ckks
             seal::Ciphertext rhs = rhs_in;
             ModSwitchToCommonLevel(lhs, rhs, evaluator);
 
-            const double target_scale = std::min(lhs.scale(), rhs.scale());
             seal::Ciphertext result;
             evaluator.multiply(lhs, rhs, result);
             evaluator.relinearize_inplace(result, relin_keys);
             evaluator.rescale_to_next_inplace(result);
-            result.scale() = target_scale;
             return result;
         }
 
@@ -59,13 +57,11 @@ namespace tfhepp_ckks
         {
             if (scalar == 1.0) return cipher;
 
-            const double target_scale = cipher.scale();
             seal::Plaintext plain;
             encoder.encode(scalar, cipher.parms_id(), cipher.scale(), plain);
             seal::Ciphertext result = cipher;
             evaluator.multiply_plain_inplace(result, plain);
             evaluator.rescale_to_next_inplace(result);
-            result.scale() = target_scale;
             return result;
         }
 
@@ -102,14 +98,12 @@ namespace tfhepp_ckks
             std::vector<double> slots(encoder.slot_count(), 0.0);
             std::fill(slots.begin(), slots.begin() + active_slots, 1.0);
 
-            const double target_scale = cipher.scale();
             seal::Plaintext plain;
             encoder.encode(slots, cipher.parms_id(), cipher.scale(), plain);
 
             seal::Ciphertext result = cipher;
             evaluator.multiply_plain_inplace(result, plain);
             evaluator.rescale_to_next_inplace(result);
-            result.scale() = target_scale;
             return result;
         }
 

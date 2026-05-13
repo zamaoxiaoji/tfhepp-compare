@@ -13,6 +13,7 @@ list(REMOVE_ITEM test_sources "pruned_bitclear_lsb_sweep.cpp")
 list(REMOVE_ITEM test_sources "ckks_repack_interface_smoke.cpp")
 list(REMOVE_ITEM test_sources "ckks_relational_ops_test.cpp")
 list(REMOVE_ITEM test_sources "ckks_rns_masks_test.cpp")
+list(REMOVE_ITEM test_sources "tpch_ch5_pruned_pipeline.cpp")
 
 file(COPY test.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
 file(COPY show_info.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
@@ -118,6 +119,18 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/ckks_rns_masks_test.cpp" AND TARGET tfhepp_
     add_executable(ckks_rns_masks_test ckks_rns_masks_test.cpp)
     target_link_libraries(ckks_rns_masks_test tfhepp_ckks_repack tfhe++)
     target_compile_features(ckks_rns_masks_test PRIVATE cxx_std_20)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tpch_ch5_pruned_pipeline.cpp"
+   AND TARGET tfhepp_compare
+   AND TARGET tfhepp_ckks_repack)
+    add_executable(tpch_ch5_pruned_pipeline tpch_ch5_pruned_pipeline.cpp)
+    target_link_libraries(tpch_ch5_pruned_pipeline
+        tfhepp_compare
+        tfhepp_ckks_repack
+        tfhe++
+        AES)
+    target_compile_features(tpch_ch5_pruned_pipeline PRIVATE cxx_std_20)
 endif()
 
 

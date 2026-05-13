@@ -199,8 +199,8 @@ namespace tfhepp_ckks
                               seal::Evaluator &evaluator,
                               seal::SEALContext &context)
     {
-        PackLWEsToCKKS(result, lwe_ciphers, eval_key, config, encoder,
-                       galois_keys, relin_keys, evaluator, context);
+        PackLWEsToCKKS<P>(result, lwe_ciphers, eval_key, config, encoder,
+                          galois_keys, relin_keys, evaluator, context);
         HomomorphicRound(result, result.scale(), encoder, relin_keys, evaluator,
                          context);
     }

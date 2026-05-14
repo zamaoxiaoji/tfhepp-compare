@@ -24,6 +24,16 @@ namespace
     constexpr uint32_t kDiscountBits = 4;
     constexpr uint32_t kSmallKeyBits = 4;
     constexpr uint32_t kRepackScaleBits = 29;
+    constexpr uint64_t kQ6ShipDateLo = 20101;
+    constexpr uint64_t kQ6ShipDateHi = 21101;
+    constexpr uint32_t kQ6DiscountLo = 8;
+    constexpr uint32_t kQ6DiscountHi = 10;
+    constexpr uint32_t kQ6QuantityHi = 10;
+    constexpr uint64_t kQ14ShipDateLo = 20101;
+    constexpr uint64_t kQ14ShipDateHi = 20201;
+    constexpr uint64_t kQ3Date = 20101;
+    constexpr uint64_t kQ5OrderDateLo = 20101;
+    constexpr uint64_t kQ5OrderDateHi = 21231;
 
     struct Options {
         std::size_t rows = 16;
@@ -199,7 +209,7 @@ namespace
             row.extendedprice = static_cast<double>(extendedprice_message(engine));
         }
 
-        // Match HE3DB's Q6 forced positive row.
+        // Match HE3DB's Q6 fixed row.
         if (!data.lineitem.empty()) {
             data.lineitem[0].quantity = 1;
             data.lineitem[0].discount = 9;
@@ -245,7 +255,8 @@ namespace
             data.regions[i].name = static_cast<uint32_t>(i);
         }
 
-        // Ensure every query has at least one deterministic positive witness.
+        // Keep HE3DB's Q6 fixed row, then add a second witness row for the
+        // one-year Q6 window and the join/group-by queries when possible.
         if (!data.orders.empty() && !data.customers.empty() &&
             !data.parts.empty() && !data.suppliers.empty()) {
             data.orders[0].orderdate = 11215;
@@ -259,6 +270,22 @@ namespace
             data.lineitem[0].orderkey = 0;
             data.lineitem[0].partkey = 0;
             data.lineitem[0].suppkey = 0;
+        }
+        if (data.lineitem.size() > 1 && data.orders.size() > 1 &&
+            data.customers.size() > 1 && data.suppliers.size() > 1 &&
+            data.nations.size() > 1 && !data.parts.empty()) {
+            data.lineitem[1].quantity = 1;
+            data.lineitem[1].discount = 9;
+            data.lineitem[1].shipdate = 20115;
+            data.lineitem[1].orderkey = 1;
+            data.lineitem[1].partkey = 0;
+            data.lineitem[1].suppkey = 1;
+            data.orders[1].orderkey = 1;
+            data.orders[1].custkey = 1;
+            data.orders[1].orderdate = 20115;
+            data.customers[1].nationkey = 1;
+            data.suppliers[1].nationkey = 1;
+            data.nations[1].regionkey = 1;
         }
         return data;
     }
@@ -433,12 +460,22 @@ namespace
         evaluator.add_inplace(acc, term);
     }
 
-    std::vector<double> RevenueColumn(const TpchData &data)
+    std::vector<double> Q6RevenueColumn(const TpchData &data)
     {
         std::vector<double> revenue(data.lineitem.size(), 0.0);
         for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
             revenue[i] = data.lineitem[i].extendedprice *
                          static_cast<double>(data.lineitem[i].discount);
+        }
+        return revenue;
+    }
+
+    std::vector<double> DiscountedRevenueColumn(const TpchData &data)
+    {
+        std::vector<double> revenue(data.lineitem.size(), 0.0);
+        for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
+            revenue[i] = data.lineitem[i].extendedprice *
+                         (100.0 - static_cast<double>(data.lineitem[i].discount));
         }
         return revenue;
     }
@@ -475,20 +512,93 @@ namespace
         return out;
     }
 
-    MaskResult EvalQ6Mask(const TpchData &data, const TFHESecretKey &sk,
-                          TFHEEvalKey &ek)
+    template <typename P>
+    void PrunedGreaterThan(const TFHEpp::TLWE<P> &cipher1,
+                           const TFHEpp::TLWE<P> &cipher2, TLWELvl1 &res,
+                           uint32_t plain_bits, const TFHEEvalKey &ek,
+                           const three_pbs::FastB2AEvalKeyPack &micro_pack,
+                           bool result_type)
     {
-        const uint64_t pred1 = 20101;
-        const uint64_t pred2 = 21231;
-        const uint32_t pred3 = 8;
-        const uint32_t pred4 = pred3 + 2;
-        const uint32_t pred5 = 32;
+        TFHEpp::TLWE<P> sub_tlwe;
+        for (size_t i = 0; i <= P::k * P::n; i++)
+            sub_tlwe[i] = cipher2[i] - cipher1[i];
+        three_pbs::HomMSB(res, sub_tlwe, plain_bits + 1, ek, micro_pack,
+                          result_type);
+    }
 
-        auto pred_cipher1 = EncryptInteger<Lvl2>(pred1, kShipDateBits, sk);
-        auto pred_cipher2 = EncryptInteger<Lvl2>(pred2, kShipDateBits, sk);
-        auto pred_cipher3 = EncryptInteger<Lvl1>(pred3, kDiscountBits, sk);
-        auto pred_cipher4 = EncryptInteger<Lvl1>(pred4, kDiscountBits, sk);
-        auto pred_cipher5 = EncryptInteger<Lvl1>(pred5, kQuantityBits, sk);
+    template <typename P>
+    void PrunedGreaterThanEqual(
+        const TFHEpp::TLWE<P> &cipher1, const TFHEpp::TLWE<P> &cipher2,
+        TLWELvl1 &res, uint32_t plain_bits, const TFHEEvalKey &ek,
+        const three_pbs::FastB2AEvalKeyPack &micro_pack, bool result_type)
+    {
+        TFHEpp::TLWE<P> sub_tlwe;
+        for (size_t i = 0; i <= P::k * P::n; i++)
+            sub_tlwe[i] = cipher1[i] - cipher2[i];
+        three_pbs::HomMSB(res, sub_tlwe, plain_bits + 1, ek, micro_pack,
+                          LOGIC);
+        HomNOT<Lvl1>(res, res);
+        if (IS_ARITHMETIC(result_type)) LOG_to_ARI(res, res, ek);
+    }
+
+    template <typename P>
+    void PrunedLessThan(const TFHEpp::TLWE<P> &cipher1,
+                        const TFHEpp::TLWE<P> &cipher2, TLWELvl1 &res,
+                        uint32_t plain_bits, const TFHEEvalKey &ek,
+                        const three_pbs::FastB2AEvalKeyPack &micro_pack,
+                        bool result_type)
+    {
+        TFHEpp::TLWE<P> sub_tlwe;
+        for (size_t i = 0; i <= P::k * P::n; i++)
+            sub_tlwe[i] = cipher1[i] - cipher2[i];
+        three_pbs::HomMSB(res, sub_tlwe, plain_bits + 1, ek, micro_pack,
+                          result_type);
+    }
+
+    template <typename P>
+    void PrunedLessThanEqual(
+        const TFHEpp::TLWE<P> &cipher1, const TFHEpp::TLWE<P> &cipher2,
+        TLWELvl1 &res, uint32_t plain_bits, const TFHEEvalKey &ek,
+        const three_pbs::FastB2AEvalKeyPack &micro_pack, bool result_type)
+    {
+        TFHEpp::TLWE<P> sub_tlwe;
+        for (size_t i = 0; i <= P::k * P::n; i++)
+            sub_tlwe[i] = cipher2[i] - cipher1[i];
+        three_pbs::HomMSB(res, sub_tlwe, plain_bits + 1, ek, micro_pack,
+                          LOGIC);
+        HomNOT<Lvl1>(res, res);
+        if (IS_ARITHMETIC(result_type)) LOG_to_ARI(res, res, ek);
+    }
+
+    template <typename P>
+    void PrunedEqual(const TFHEpp::TLWE<P> &cipher1,
+                     const TFHEpp::TLWE<P> &cipher2, TLWELvl1 &res,
+                     uint32_t plain_bits, const TFHEEvalKey &ek,
+                     const three_pbs::FastB2AEvalKeyPack &micro_pack,
+                     bool result_type)
+    {
+        TLWELvl1 ge_tlwe, le_tlwe;
+        PrunedGreaterThanEqual<P>(cipher1, cipher2, ge_tlwe, plain_bits, ek,
+                                  micro_pack, LOGIC);
+        PrunedLessThanEqual<P>(cipher1, cipher2, le_tlwe, plain_bits, ek,
+                               micro_pack, LOGIC);
+        HomAND(res, ge_tlwe, le_tlwe, ek, result_type);
+    }
+
+    MaskResult EvalQ6Mask(const TpchData &data, const TFHESecretKey &sk,
+                          TFHEEvalKey &ek,
+                          const three_pbs::FastB2AEvalKeyPack &micro_pack)
+    {
+        auto pred_cipher1 =
+            EncryptInteger<Lvl2>(kQ6ShipDateLo, kShipDateBits, sk);
+        auto pred_cipher2 =
+            EncryptInteger<Lvl2>(kQ6ShipDateHi - 1, kShipDateBits, sk);
+        auto pred_cipher3 =
+            EncryptInteger<Lvl1>(kQ6DiscountLo, kDiscountBits, sk);
+        auto pred_cipher4 =
+            EncryptInteger<Lvl1>(kQ6DiscountHi, kDiscountBits, sk);
+        auto pred_cipher5 =
+            EncryptInteger<Lvl1>(kQ6QuantityHi, kQuantityBits, sk);
 
         MaskResult result;
         result.masks.resize(data.lineitem.size());
@@ -507,8 +617,8 @@ namespace
             TLWELvl1 p1, p2, p3, p4, p5;
             three_pbs::greater_than_equal<Lvl2>(shipdate, pred_cipher1,
                                                 p1, kShipDateBits, ek, LOGIC);
-            three_pbs::less_than<Lvl2>(shipdate, pred_cipher2,
-                                       p2, kShipDateBits, ek, LOGIC);
+            three_pbs::greater_than_equal<Lvl2>(pred_cipher2, shipdate,
+                                                p2, kShipDateBits, ek, LOGIC);
             three_pbs::greater_than_equal<Lvl1>(discount, pred_cipher3,
                                                 p3, kDiscountBits, ek, LOGIC);
             three_pbs::less_than_equal<Lvl1>(discount, pred_cipher4,
@@ -517,14 +627,35 @@ namespace
                                        p5, kQuantityBits, ek, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({p1, p2, p3, p4, p5}, ek);
             result.expected[i] =
-                (row.shipdate >= pred1 && row.shipdate < pred2 &&
-                 row.discount >= pred3 && row.discount <= pred4 &&
-                 row.quantity < pred5)
+                (row.shipdate >= kQ6ShipDateLo &&
+                 row.shipdate < kQ6ShipDateHi &&
+                 row.discount >= kQ6DiscountLo &&
+                 row.discount <= kQ6DiscountHi &&
+                 row.quantity < kQ6QuantityHi)
                     ? 1
                     : 0;
-            if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
-                result.expected[i])
+            const auto decoded_mask =
+                DecodeMask(result.masks[i], sk, std::pow(2.0, 31));
+            if (decoded_mask != result.expected[i]) {
                 ++result.compare_errors;
+                std::cerr << "debug=q6_compare_mismatch,row=" << i
+                          << ",shipdate=" << row.shipdate
+                          << ",discount=" << row.discount
+                          << ",quantity=" << row.quantity
+                          << ",expected=" << result.expected[i]
+                          << ",got=" << decoded_mask
+                          << ",p_ship_ge="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(p1, sk.key.lvl1)
+                          << ",p_ship_lt="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(p2, sk.key.lvl1)
+                          << ",p_discount_ge="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(p3, sk.key.lvl1)
+                          << ",p_discount_le="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(p4, sk.key.lvl1)
+                          << ",p_quantity_lt="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(p5, sk.key.lvl1)
+                          << "\n";
+            }
         }
         const auto end = std::chrono::steady_clock::now();
         result.compare_ms =
@@ -536,10 +667,8 @@ namespace
     MaskResult EvalQ14DateMask(const TpchData &data, const TFHESecretKey &sk,
                                TFHEEvalKey &ek)
     {
-        const uint64_t lo = 20101;
-        const uint64_t hi = 20201;
-        auto clo = EncryptInteger<Lvl2>(lo, kShipDateBits, sk);
-        auto chi = EncryptInteger<Lvl2>(hi, kShipDateBits, sk);
+        auto clo = EncryptInteger<Lvl2>(kQ14ShipDateLo, kShipDateBits, sk);
+        auto chi = EncryptInteger<Lvl2>(kQ14ShipDateHi - 1, kShipDateBits, sk);
 
         MaskResult result;
         result.masks.resize(data.lineitem.size());
@@ -551,11 +680,12 @@ namespace
             TLWELvl1 ge, lt;
             three_pbs::greater_than_equal<Lvl2>(shipdate, clo,
                                                 ge, kShipDateBits, ek, LOGIC);
-            three_pbs::less_than<Lvl2>(shipdate, chi,
-                                       lt, kShipDateBits, ek, LOGIC);
+            three_pbs::greater_than_equal<Lvl2>(chi, shipdate,
+                                                lt, kShipDateBits, ek, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({ge, lt}, ek);
             result.expected[i] =
-                (data.lineitem[i].shipdate >= lo && data.lineitem[i].shipdate < hi)
+                (data.lineitem[i].shipdate >= kQ14ShipDateLo &&
+                 data.lineitem[i].shipdate < kQ14ShipDateHi)
                     ? 1
                     : 0;
             if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
@@ -572,8 +702,7 @@ namespace
     MaskResult EvalQ3LineitemMask(const TpchData &data, const TFHESecretKey &sk,
                                   TFHEEvalKey &ek)
     {
-        const uint64_t date = 20101;
-        auto cdate = EncryptInteger<Lvl2>(date, kShipDateBits, sk);
+        auto cdate = EncryptInteger<Lvl2>(kQ3Date - 1, kShipDateBits, sk);
         MaskResult result;
         result.masks.resize(data.lineitem.size());
         result.expected.resize(data.lineitem.size(), 0);
@@ -585,7 +714,7 @@ namespace
             three_pbs::greater_than<Lvl2>(shipdate, cdate,
                                           gt, kShipDateBits, ek, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({gt}, ek);
-            result.expected[i] = data.lineitem[i].shipdate > date ? 1 : 0;
+            result.expected[i] = data.lineitem[i].shipdate > kQ3Date ? 1 : 0;
             if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
                 result.expected[i])
                 ++result.compare_errors;
@@ -600,8 +729,7 @@ namespace
     MaskResult EvalQ3OrderDateMask(const TpchData &data,
                                    const TFHESecretKey &sk, TFHEEvalKey &ek)
     {
-        const uint64_t date = 20101;
-        auto cdate = EncryptInteger<Lvl2>(date, kShipDateBits, sk);
+        auto cdate = EncryptInteger<Lvl2>(kQ3Date, kShipDateBits, sk);
         MaskResult result;
         result.masks.resize(data.orders.size());
         result.expected.resize(data.orders.size(), 0);
@@ -610,10 +738,10 @@ namespace
             const auto &order = data.orders[i];
             auto orderdate = EncryptInteger<Lvl2>(order.orderdate, kShipDateBits, sk);
             TLWELvl1 date_ok;
-            three_pbs::less_than<Lvl2>(orderdate, cdate,
-                                       date_ok, kShipDateBits, ek, LOGIC);
+            three_pbs::greater_than_equal<Lvl2>(cdate, orderdate, date_ok,
+                                                kShipDateBits, ek, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({date_ok}, ek);
-            result.expected[i] = (order.orderdate < date) ? 1 : 0;
+            result.expected[i] = (order.orderdate < kQ3Date) ? 1 : 0;
             if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
                 result.expected[i])
                 ++result.compare_errors;
@@ -658,10 +786,8 @@ namespace
     MaskResult EvalQ5OrderMask(const TpchData &data, const TFHESecretKey &sk,
                                TFHEEvalKey &ek)
     {
-        const uint64_t lo = 20101;
-        const uint64_t hi = 21231;
-        auto clo = EncryptInteger<Lvl2>(lo, kShipDateBits, sk);
-        auto chi = EncryptInteger<Lvl2>(hi, kShipDateBits, sk);
+        auto clo = EncryptInteger<Lvl2>(kQ5OrderDateLo, kShipDateBits, sk);
+        auto chi = EncryptInteger<Lvl2>(kQ5OrderDateHi - 1, kShipDateBits, sk);
         MaskResult result;
         result.masks.resize(data.orders.size());
         result.expected.resize(data.orders.size(), 0);
@@ -672,11 +798,12 @@ namespace
             TLWELvl1 ge, lt;
             three_pbs::greater_than_equal<Lvl2>(orderdate, clo,
                                                 ge, kShipDateBits, ek, LOGIC);
-            three_pbs::less_than<Lvl2>(orderdate, chi,
-                                       lt, kShipDateBits, ek, LOGIC);
+            three_pbs::greater_than_equal<Lvl2>(chi, orderdate,
+                                                lt, kShipDateBits, ek, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({ge, lt}, ek);
             result.expected[i] =
-                (data.orders[i].orderdate >= lo && data.orders[i].orderdate < hi)
+                (data.orders[i].orderdate >= kQ5OrderDateLo &&
+                 data.orders[i].orderdate < kQ5OrderDateHi)
                     ? 1
                     : 0;
             if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
@@ -693,41 +820,59 @@ namespace
     QueryPlainResult PlainQ6(const TpchData &data)
     {
         QueryPlainResult out{"q6", {0.0}};
-        const auto revenue = RevenueColumn(data);
+        const auto revenue = Q6RevenueColumn(data);
         for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
             const auto &row = data.lineitem[i];
-            if (row.shipdate >= 20101 && row.shipdate < 21231 &&
-                row.discount >= 8 && row.discount <= 10 && row.quantity < 32)
+            if (row.shipdate >= kQ6ShipDateLo &&
+                row.shipdate < kQ6ShipDateHi &&
+                row.discount >= kQ6DiscountLo &&
+                row.discount <= kQ6DiscountHi &&
+                row.quantity < kQ6QuantityHi)
                 out.values[0] += revenue[i];
         }
         return out;
     }
 
-    QueryPlainResult PlainQ14(const TpchData &data)
+    QueryPlainResult PlainQ14Groups(const TpchData &data)
     {
-        QueryPlainResult out{"q14", std::vector<double>(2, 0.0)};
-        const auto revenue = RevenueColumn(data);
+        QueryPlainResult out{"q14_groups", std::vector<double>(2, 0.0)};
+        const auto revenue = DiscountedRevenueColumn(data);
         for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
             const auto &line = data.lineitem[i];
-            if (!(line.shipdate >= 20101 && line.shipdate < 20201)) continue;
+            if (!(line.shipdate >= kQ14ShipDateLo &&
+                  line.shipdate < kQ14ShipDateHi))
+                continue;
             const auto promo = data.parts[line.partkey % data.parts.size()].promo;
             out.values[promo] += revenue[i];
         }
         return out;
     }
 
+    double PromoRevenueRatio(const std::vector<double> &promo_groups)
+    {
+        if (promo_groups.size() < 2) return 0.0;
+        const double total = promo_groups[0] + promo_groups[1];
+        return std::abs(total) < 1e-9 ? 0.0 : 100.0 * promo_groups[1] / total;
+    }
+
+    QueryPlainResult PlainQ14(const TpchData &data)
+    {
+        const auto groups = PlainQ14Groups(data);
+        return QueryPlainResult{"q14", {PromoRevenueRatio(groups.values)}};
+    }
+
     QueryPlainResult PlainQ3(const TpchData &data)
     {
         QueryPlainResult out{
             "q3", std::vector<double>(data.key_domain * data.priority_domain, 0.0)};
-        const auto revenue = RevenueColumn(data);
+        const auto revenue = DiscountedRevenueColumn(data);
         for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
             const auto &line = data.lineitem[i];
             const auto &order = data.orders[line.orderkey % data.orders.size()];
             const auto &customer =
                 data.customers[order.custkey % data.customers.size()];
-            if (customer.mktsegment == 1 && order.orderdate < 20101 &&
-                line.shipdate > 20101) {
+            if (customer.mktsegment == 1 && order.orderdate < kQ3Date &&
+                line.shipdate > kQ3Date) {
                 const std::size_t group =
                     order.orderkey * data.priority_domain + order.shippriority;
                 out.values[group] += revenue[i];
@@ -739,7 +884,7 @@ namespace
     QueryPlainResult PlainQ5(const TpchData &data)
     {
         QueryPlainResult out{"q5", std::vector<double>(data.nation_domain, 0.0)};
-        const auto revenue = RevenueColumn(data);
+        const auto revenue = DiscountedRevenueColumn(data);
         for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
             const auto &line = data.lineitem[i];
             const auto &order = data.orders[line.orderkey % data.orders.size()];
@@ -749,9 +894,9 @@ namespace
                 data.suppliers[line.suppkey % data.suppliers.size()];
             const auto &nation =
                 data.nations[customer.nationkey % data.nations.size()];
-            if (order.orderdate >= 20101 && order.orderdate < 21231 &&
-                customer.nationkey == supplier.nationkey &&
-                nation.regionkey == 1) {
+            if (order.orderdate >= kQ5OrderDateLo &&
+                order.orderdate < kQ5OrderDateHi &&
+                customer.nationkey == supplier.nationkey && nation.regionkey == 1) {
                 out.values[customer.nationkey] += revenue[i];
             }
         }
@@ -1075,7 +1220,8 @@ namespace
             PackMaskToCkks(mask, tfhe_sk, tfhe_ek, repack_key, repack_config, ckks);
         std::cerr << "debug=q6_mask,scale_log2=" << std::log2(mask_ct.scale())
                   << ",level=" << mask_ct.coeff_modulus_size() << "\n";
-        auto revenue_ct = ckks.encrypt_for_multiply(RevenueColumn(data), mask_ct);
+        auto revenue_ct =
+            ckks.encrypt_for_multiply(Q6RevenueColumn(data), mask_ct);
         std::cerr << "debug=q6_revenue,scale_log2=" << std::log2(revenue_ct.scale())
                   << ",level=" << revenue_ct.coeff_modulus_size() << "\n";
         auto filtered =
@@ -1121,7 +1267,7 @@ namespace
 
         std::cerr << "stage=q14,revenue_filter,start\n";
         auto revenue_ct =
-            ckks.encrypt_for_multiply(RevenueColumn(data), date_mask_ct);
+            ckks.encrypt_for_multiply(DiscountedRevenueColumn(data), date_mask_ct);
         auto filtered_revenue =
             MultiplyAndRescale(date_mask_ct, revenue_ct, ckks.relin_keys,
                                ckks.evaluator);
@@ -1137,9 +1283,11 @@ namespace
             filtered_revenue, promo_masks, data.lineitem.size(), ckks.relin_keys,
             ckks.galois_keys, ckks.evaluator);
         std::cerr << "stage=q14,groupby,done\n";
-        QueryPlainResult got{"q14", std::vector<double>(2, 0.0)};
+        std::vector<double> group_values(2, 0.0);
         for (std::size_t i = 0; i < sums.size(); ++i)
-            got.values[i] = DecryptSlots(sums[i], ckks.decryptor, ckks.encoder)[0];
+            group_values[i] =
+                DecryptSlots(sums[i], ckks.decryptor, ckks.encoder)[0];
+        QueryPlainResult got{"q14", {PromoRevenueRatio(group_values)}};
         const auto expected = PlainQ14(data);
         PrintResult("encrypted", expected, got.values, date_mask.compare_ms,
                     date_mask.compare_errors, date_mask.repack_errors);
@@ -1240,7 +1388,7 @@ namespace
             group_columns, group_domains,
             ckks.relin_keys, ckks.encoder, ckks.evaluator);
         auto sums = GroupByFilteredRevenue(
-            filtered, order_priority_masks, RevenueColumn(data),
+            filtered, order_priority_masks, DiscountedRevenueColumn(data),
             data.lineitem.size(), ckks);
         QueryPlainResult got{
             "q3", std::vector<double>(data.key_domain * data.priority_domain)};
@@ -1345,8 +1493,8 @@ namespace
             MultiplyAndRescale(filtered, region_on_line, ckks.relin_keys,
                                ckks.evaluator);
         auto sums = GroupByFilteredRevenue(
-            filtered, nation_masks, RevenueColumn(data), data.lineitem.size(),
-            ckks);
+            filtered, nation_masks, DiscountedRevenueColumn(data),
+            data.lineitem.size(), ckks);
         QueryPlainResult got{"q5", std::vector<double>(data.nation_domain)};
         for (std::size_t i = 0; i < sums.size(); ++i)
             got.values[i] = DecryptSlots(sums[i], ckks.decryptor, ckks.encoder)[0];
@@ -1418,7 +1566,7 @@ int main(int argc, char **argv)
     const Options opts = ParseOptions(argc, argv);
     const TpchData data = GenerateTpchLikeData(opts);
 
-    std::cout << "tpch_ch5_pruned_pipeline"
+    std::cout << "tpch_3pbs_q6_q14_q3_q5"
               << ",rows=" << opts.rows
               << ",seed=" << opts.seed
               << ",encrypted=" << (opts.encrypted ? "true" : "false")

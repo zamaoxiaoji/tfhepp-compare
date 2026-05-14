@@ -19,7 +19,7 @@ option(USE_TFHE_RS "Use the parameter set proposed in TFHE-rs" OFF)
 option(USE_TERNARY "Use ternary secret keys" OFF)
 option(USE_COMPRESS "Use compressed ciphertexts" OFF)
 option(USE_SUBSET_KEY "Use subset key" OFF)
-option(USE_HE3DB_COMPAT "Use HE3DB-compatible parameters (lvl0 uint32_t, n=672)" OFF)
+option(USE_HE3DB_COMPAT "Use HE3DB-compatible parameters (lvl0 uint32_t, n=672)" ON)
 
 option(USE_TERNARY_CMUX "Use ternary cmux" OFF)
 option(USE_KEY_BUNDLE "Use key bundle algorithm" OFF)
@@ -174,7 +174,7 @@ add_subdirectory(comparison)
 
 if(ENABLE_CKKS_REPACK)
   set(HE3DB_ROOT
-      "${PROJECT_SOURCE_DIR}/../HE3DB"
+      "${PROJECT_SOURCE_DIR}/../AE_submit/SOTA/HE3DB"
       CACHE PATH "HE3DB checkout used to provide vendored Microsoft SEAL")
   if(NOT TARGET seal)
     if(NOT EXISTS "${HE3DB_ROOT}/thirdparty/SEAL/CMakeLists.txt")

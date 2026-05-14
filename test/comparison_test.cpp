@@ -4,18 +4,21 @@
  *
  *   1) ethmsb     — ETHMSB + gap offset           (samplepaper.tex)
  *   2) three_pbs  — Pruned BitExtract + Micro-PBS B2A + ETHMSB (Chapter 3)
- *   3) HEDB       — HE3DB original HomMSB         (only when HE3DB sources are
- *                                                  available at ../HE3DB/src)
+ *   3) HEDB       — HE3DB original HomMSB         (when HE3DB_ORIGINAL_ROOT is
+ *                                                  available)
  *
  * Layout follows HE3DB's test/comparison_test.cpp: a Lvl1 entry point for
  * 1–10-bit inputs, a Lvl2 entry point for 11–32-bit inputs, with five
  * predicates (>, ≥, <, ≤, =) timed per algorithm.
  */
 #include <chrono>
+#include <algorithm>
 #include <array>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -35,6 +38,10 @@ using namespace tfhepp_compare;
 namespace
 {
     constexpr const char *kPredicateNames[5] = {">", ">=", "<", "<=", "=="};
+    std::array<bool, 5>   g_enabled_ops = {true, true, true, true, true};
+    bool                  g_run_ethmsb = true;
+    bool                  g_run_three_pbs = true;
+    bool                  g_run_he3db = true;
 
     struct AlgoMetrics {
         std::vector<uint32_t> error_time   = std::vector<uint32_t>(5, 0);
@@ -103,11 +110,11 @@ namespace
             }
         };
 
-        exec(gt, 0);
-        exec(ge, 1);
-        exec(lt, 2);
-        exec(le, 3);
-        exec(eq, 4);
+        if (g_enabled_ops[0]) exec(gt, 0);
+        if (g_enabled_ops[1]) exec(ge, 1);
+        if (g_enabled_ops[2]) exec(lt, 2);
+        if (g_enabled_ops[3]) exec(le, 3);
+        if (g_enabled_ops[4]) exec(eq, 4);
     }
 
     void print_results(const std::string &label, const AlgoMetrics &m,
@@ -116,6 +123,7 @@ namespace
         std::cout << "  [" << label << "]\n";
         std::cout << "    op    avg_time(ms)   errors\n";
         for (size_t i = 0; i < 5; i++) {
+            if (!g_enabled_ops[i]) continue;
             std::cout << "    " << std::setw(4) << std::left
                       << kPredicateNames[i] << "  " << std::setw(11)
                       << std::right << std::fixed << std::setprecision(2)
@@ -129,6 +137,97 @@ namespace
                       << " expected=" << m.first_expected
                       << " decoded=" << m.first_decoded << "\n";
         }
+    }
+
+    std::vector<uint32_t> parse_bits_filter(const std::string &arg)
+    {
+        std::vector<uint32_t> bits;
+        std::size_t start = 0;
+        while (start < arg.size()) {
+            const std::size_t comma = arg.find(',', start);
+            const std::size_t end =
+                comma == std::string::npos ? arg.size() : comma;
+            if (end == start)
+                throw std::invalid_argument("empty bit width in filter");
+            bits.push_back(static_cast<uint32_t>(
+                std::stoul(arg.substr(start, end - start))));
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        return bits;
+    }
+
+    bool wants_bit(const std::vector<uint32_t> &filter, uint32_t bit)
+    {
+        return filter.empty() ||
+               std::find(filter.begin(), filter.end(), bit) != filter.end();
+    }
+
+    size_t parse_op_name(const std::string &name)
+    {
+        if (name == "gt" || name == ">") return 0;
+        if (name == "ge" || name == ">=") return 1;
+        if (name == "lt" || name == "<") return 2;
+        if (name == "le" || name == "<=") return 3;
+        if (name == "eq" || name == "==") return 4;
+        throw std::invalid_argument("unknown op filter: " + name);
+    }
+
+    void parse_ops_filter(const std::string &arg)
+    {
+        if (arg == "all") {
+            g_enabled_ops = {true, true, true, true, true};
+            return;
+        }
+        g_enabled_ops = {false, false, false, false, false};
+        std::size_t start = 0;
+        while (start < arg.size()) {
+            const std::size_t comma = arg.find(',', start);
+            const std::size_t end =
+                comma == std::string::npos ? arg.size() : comma;
+            if (end == start) throw std::invalid_argument("empty op filter");
+            g_enabled_ops[parse_op_name(arg.substr(start, end - start))] =
+                true;
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    }
+
+    void parse_algo_filter(const std::string &arg)
+    {
+        if (arg == "all") {
+            g_run_ethmsb = true;
+            g_run_three_pbs = true;
+            g_run_he3db = true;
+            return;
+        }
+        g_run_ethmsb = false;
+        g_run_three_pbs = false;
+        g_run_he3db = false;
+        std::size_t start = 0;
+        while (start < arg.size()) {
+            const std::size_t comma = arg.find(',', start);
+            const std::size_t end =
+                comma == std::string::npos ? arg.size() : comma;
+            if (end == start) throw std::invalid_argument("empty algo filter");
+            const std::string name = arg.substr(start, end - start);
+            if (name == "ethmsb")
+                g_run_ethmsb = true;
+            else if (name == "3pbs" || name == "three_pbs")
+                g_run_three_pbs = true;
+            else if (name == "he3db")
+                g_run_he3db = true;
+            else
+                throw std::invalid_argument("unknown algo filter: " + name);
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    }
+
+    void log_stage(uint32_t plain_bits, const char *stage)
+    {
+        std::cerr << "stage=compare,plain_bits=" << plain_bits
+                  << "," << stage << "\n";
     }
 
     template <typename P>
@@ -163,7 +262,7 @@ namespace
             }
         };
 
-        exec(
+        if (g_enabled_ops[0]) exec(
             [&](TLWELvl1 &res) {
                 TFHEpp::TLWE<P> sub_tlwe;
                 for (size_t i = 0; i <= P::k * P::n; i++)
@@ -173,7 +272,7 @@ namespace
             },
             0);
 
-        exec(
+        if (g_enabled_ops[1]) exec(
             [&](TLWELvl1 &res) {
                 TFHEpp::TLWE<P> sub_tlwe;
                 for (size_t i = 0; i <= P::k * P::n; i++)
@@ -186,7 +285,7 @@ namespace
             },
             1);
 
-        exec(
+        if (g_enabled_ops[2]) exec(
             [&](TLWELvl1 &res) {
                 TFHEpp::TLWE<P> sub_tlwe;
                 for (size_t i = 0; i <= P::k * P::n; i++)
@@ -196,7 +295,7 @@ namespace
             },
             2);
 
-        exec(
+        if (g_enabled_ops[3]) exec(
             [&](TLWELvl1 &res) {
                 TFHEpp::TLWE<P> sub_tlwe;
                 for (size_t i = 0; i <= P::k * P::n; i++)
@@ -209,7 +308,7 @@ namespace
             },
             3);
 
-        exec(
+        if (g_enabled_ops[4]) exec(
             [&](TLWELvl1 &res) {
                 TLWELvl1 ge_tlwe, le_tlwe;
                 TFHEpp::TLWE<P> sub_ge, sub_le;
@@ -256,11 +355,19 @@ namespace
                   << ", trials=" << num_test << " ===\n";
         using P = Lvl1;
 
+        log_stage(plain_bits, "keygen=start");
         TFHESecretKey sk;
         TFHEEvalKey   ek;
         ek.emplacebkfft<Lvl01>(sk);
+        log_stage(plain_bits, "bkfft_lvl01=done");
         ek.emplaceiksk<Lvl10>(sk);
-        const auto micro_pack = three_pbs::GenerateFastB2AEvalKeyPack(sk, false);
+        log_stage(plain_bits, "iksk_lvl10=done");
+        std::optional<three_pbs::FastB2AEvalKeyPack> micro_pack;
+        if (g_run_three_pbs) {
+            log_stage(plain_bits, "micro_pack=start");
+            micro_pack.emplace(three_pbs::GenerateFastB2AEvalKeyPack(sk, false));
+            log_stage(plain_bits, "micro_pack=done");
+        }
 
         const uint32_t scale_bits =
             std::numeric_limits<P::T>::digits - plain_bits - 1;
@@ -281,18 +388,33 @@ namespace
             TFHEpp::TLWE<P> c1 = tlweSymInt32Encrypt<P>(
                 p1, P::α, std::pow(2., scale_bits), sk.key.get<P>());
 
-            RUN_ALGO_TRIAL(ethmsb, ethmsb_m);
-            run_three_pbs_micro_trial<P>(three_pbs_m, c0, c1, p0, p1,
-                                         plain_bits, ek, micro_pack, sk);
+            if (g_run_ethmsb) {
+                log_stage(plain_bits, "algo=ethmsb,start");
+                RUN_ALGO_TRIAL(ethmsb, ethmsb_m);
+                log_stage(plain_bits, "algo=ethmsb,done");
+            }
+            if (g_run_three_pbs) {
+                log_stage(plain_bits, "algo=3pbs,start");
+                run_three_pbs_micro_trial<P>(three_pbs_m, c0, c1, p0, p1,
+                                             plain_bits, ek, *micro_pack, sk);
+                log_stage(plain_bits, "algo=3pbs,done");
+            }
 #if HAVE_HE3DB_ORIGINAL
-            RUN_ALGO_TRIAL(HEDB,      he3db_m);
+            if (g_run_he3db) {
+                log_stage(plain_bits, "algo=he3db,start");
+                RUN_ALGO_TRIAL(HEDB,      he3db_m);
+                log_stage(plain_bits, "algo=he3db,done");
+            }
 #endif
         }
 
-        print_results("ETHMSB+offset    (samplepaper)", ethmsb_m, num_test);
-        print_results("Pruned 3-PBS optimized        ", three_pbs_m, num_test);
+        if (g_run_ethmsb)
+            print_results("ETHMSB+offset    (samplepaper)", ethmsb_m, num_test);
+        if (g_run_three_pbs)
+            print_results("Pruned 3-PBS optimized        ", three_pbs_m, num_test);
 #if HAVE_HE3DB_ORIGINAL
-        print_results("HE3DB HomMSB     (original)   ", he3db_m, num_test);
+        if (g_run_he3db)
+            print_results("HE3DB HomMSB     (original)   ", he3db_m, num_test);
 #endif
     }
 
@@ -302,14 +424,25 @@ namespace
                   << ", trials=" << num_test << " ===\n";
         using P = Lvl2;
 
+        log_stage(plain_bits, "keygen=start");
         TFHESecretKey sk;
         TFHEEvalKey   ek;
         ek.emplacebkfft<Lvl01>(sk);
+        log_stage(plain_bits, "bkfft_lvl01=done");
         ek.emplacebkfft<Lvl02>(sk);
+        log_stage(plain_bits, "bkfft_lvl02=done");
         ek.emplaceiksk<Lvl10>(sk);
+        log_stage(plain_bits, "iksk_lvl10=done");
         ek.emplaceiksk<Lvl20>(sk);
+        log_stage(plain_bits, "iksk_lvl20=done");
         ek.emplaceiksk<Lvl21>(sk);
-        const auto micro_pack = three_pbs::GenerateFastB2AEvalKeyPack(sk, true);
+        log_stage(plain_bits, "iksk_lvl21=done");
+        std::optional<three_pbs::FastB2AEvalKeyPack> micro_pack;
+        if (g_run_three_pbs) {
+            log_stage(plain_bits, "micro_pack=start");
+            micro_pack.emplace(three_pbs::GenerateFastB2AEvalKeyPack(sk, true));
+            log_stage(plain_bits, "micro_pack=done");
+        }
 
         const uint32_t scale_bits =
             std::numeric_limits<P::T>::digits - plain_bits - 1;
@@ -330,19 +463,178 @@ namespace
             TFHEpp::TLWE<P> c1 = tlweSymInt32Encrypt<P>(
                 p1, P::α, std::pow(2., scale_bits), sk.key.get<P>());
 
-            RUN_ALGO_TRIAL(ethmsb, ethmsb_m);
-            run_three_pbs_micro_trial<P>(three_pbs_m, c0, c1, p0, p1,
-                                         plain_bits, ek, micro_pack, sk);
+            if (g_run_ethmsb) {
+                log_stage(plain_bits, "algo=ethmsb,start");
+                RUN_ALGO_TRIAL(ethmsb, ethmsb_m);
+                log_stage(plain_bits, "algo=ethmsb,done");
+            }
+            if (g_run_three_pbs) {
+                log_stage(plain_bits, "algo=3pbs,start");
+                run_three_pbs_micro_trial<P>(three_pbs_m, c0, c1, p0, p1,
+                                             plain_bits, ek, *micro_pack, sk);
+                log_stage(plain_bits, "algo=3pbs,done");
+            }
 #if HAVE_HE3DB_ORIGINAL
-            RUN_ALGO_TRIAL(HEDB,      he3db_m);
+            if (g_run_he3db) {
+                log_stage(plain_bits, "algo=he3db,start");
+                RUN_ALGO_TRIAL(HEDB,      he3db_m);
+                log_stage(plain_bits, "algo=he3db,done");
+            }
 #endif
         }
 
-        print_results("ETHMSB+offset    (samplepaper)", ethmsb_m, num_test);
-        print_results("Pruned 3-PBS optimized        ", three_pbs_m, num_test);
+        if (g_run_ethmsb)
+            print_results("ETHMSB+offset    (samplepaper)", ethmsb_m, num_test);
+        if (g_run_three_pbs)
+            print_results("Pruned 3-PBS optimized        ", three_pbs_m, num_test);
 #if HAVE_HE3DB_ORIGINAL
-        print_results("HE3DB HomMSB     (original)   ", he3db_m, num_test);
+        if (g_run_he3db)
+            print_results("HE3DB HomMSB     (original)   ", he3db_m, num_test);
 #endif
+    }
+
+    void tlwelvl1_reuse_key_suite(const std::vector<uint32_t> &bits,
+                                  int num_test)
+    {
+        if (bits.empty()) return;
+        using P = Lvl1;
+
+        std::cout << "\n=== Lvl1 comparison suite: reused keys, trials="
+                  << num_test << " ===\n";
+        log_stage(bits.front(), "keygen=start");
+        TFHESecretKey sk;
+        TFHEEvalKey   ek;
+        ek.emplacebkfft<Lvl01>(sk);
+        log_stage(bits.front(), "bkfft_lvl01=done");
+        ek.emplaceiksk<Lvl10>(sk);
+        log_stage(bits.front(), "iksk_lvl10=done");
+        std::optional<three_pbs::FastB2AEvalKeyPack> micro_pack;
+        if (g_run_three_pbs) {
+            log_stage(bits.front(), "micro_pack=start");
+            micro_pack.emplace(three_pbs::GenerateFastB2AEvalKeyPack(sk, false));
+            log_stage(bits.front(), "micro_pack=done");
+        }
+
+        for (const uint32_t plain_bits : bits) {
+            std::cout << "\n=== Lvl1 comparison: plain_bits=" << plain_bits
+                      << ", trials=" << num_test << " ===\n";
+
+            const uint32_t scale_bits =
+                std::numeric_limits<P::T>::digits - plain_bits - 1;
+            std::default_random_engine engine(0x5eed1000u ^
+                                              (plain_bits * 0x9e3779b9u));
+            std::uniform_int_distribution<typename P::T> message(
+                0, (typename P::T(1) << (plain_bits - 1)) - 1);
+
+            AlgoMetrics ethmsb_m, three_pbs_m;
+#if HAVE_HE3DB_ORIGINAL
+            AlgoMetrics he3db_m;
+#endif
+            for (int t = 0; t < num_test; t++) {
+                const typename P::T p0 = message(engine);
+                const typename P::T p1 = message(engine);
+                TFHEpp::TLWE<P>     c0 = tlweSymInt32Encrypt<P>(
+                    p0, P::α, std::pow(2., scale_bits), sk.key.get<P>());
+                TFHEpp::TLWE<P> c1 = tlweSymInt32Encrypt<P>(
+                    p1, P::α, std::pow(2., scale_bits), sk.key.get<P>());
+
+                if (g_run_ethmsb) RUN_ALGO_TRIAL(ethmsb, ethmsb_m);
+                if (g_run_three_pbs)
+                    run_three_pbs_micro_trial<P>(three_pbs_m, c0, c1, p0, p1,
+                                                 plain_bits, ek, *micro_pack,
+                                                 sk);
+#if HAVE_HE3DB_ORIGINAL
+                if (g_run_he3db) RUN_ALGO_TRIAL(HEDB, he3db_m);
+#endif
+            }
+
+            if (g_run_ethmsb)
+                print_results("ETHMSB+offset    (samplepaper)", ethmsb_m,
+                              num_test);
+            if (g_run_three_pbs)
+                print_results("Pruned 3-PBS optimized        ", three_pbs_m,
+                              num_test);
+#if HAVE_HE3DB_ORIGINAL
+            if (g_run_he3db)
+                print_results("HE3DB HomMSB     (original)   ", he3db_m,
+                              num_test);
+#endif
+        }
+    }
+
+    void tlwelvl2_reuse_key_suite(const std::vector<uint32_t> &bits,
+                                  int num_test)
+    {
+        if (bits.empty()) return;
+        using P = Lvl2;
+
+        std::cout << "\n=== Lvl2 comparison suite: reused keys, trials="
+                  << num_test << " ===\n";
+        log_stage(bits.front(), "keygen=start");
+        TFHESecretKey sk;
+        TFHEEvalKey   ek;
+        ek.emplacebkfft<Lvl01>(sk);
+        log_stage(bits.front(), "bkfft_lvl01=done");
+        ek.emplacebkfft<Lvl02>(sk);
+        log_stage(bits.front(), "bkfft_lvl02=done");
+        ek.emplaceiksk<Lvl10>(sk);
+        log_stage(bits.front(), "iksk_lvl10=done");
+        ek.emplaceiksk<Lvl20>(sk);
+        log_stage(bits.front(), "iksk_lvl20=done");
+        ek.emplaceiksk<Lvl21>(sk);
+        log_stage(bits.front(), "iksk_lvl21=done");
+        std::optional<three_pbs::FastB2AEvalKeyPack> micro_pack;
+        if (g_run_three_pbs) {
+            log_stage(bits.front(), "micro_pack=start");
+            micro_pack.emplace(three_pbs::GenerateFastB2AEvalKeyPack(sk, true));
+            log_stage(bits.front(), "micro_pack=done");
+        }
+
+        for (const uint32_t plain_bits : bits) {
+            std::cout << "\n=== Lvl2 comparison: plain_bits=" << plain_bits
+                      << ", trials=" << num_test << " ===\n";
+
+            const uint32_t scale_bits =
+                std::numeric_limits<P::T>::digits - plain_bits - 1;
+            std::default_random_engine engine(0x5eed2000u ^
+                                              (plain_bits * 0x9e3779b9u));
+            std::uniform_int_distribution<typename P::T> message(
+                0, (typename P::T(1) << (plain_bits - 1)) - 1);
+
+            AlgoMetrics ethmsb_m, three_pbs_m;
+#if HAVE_HE3DB_ORIGINAL
+            AlgoMetrics he3db_m;
+#endif
+            for (int t = 0; t < num_test; t++) {
+                const typename P::T p0 = message(engine);
+                const typename P::T p1 = message(engine);
+                TFHEpp::TLWE<P>     c0 = tlweSymInt32Encrypt<P>(
+                    p0, P::α, std::pow(2., scale_bits), sk.key.get<P>());
+                TFHEpp::TLWE<P> c1 = tlweSymInt32Encrypt<P>(
+                    p1, P::α, std::pow(2., scale_bits), sk.key.get<P>());
+
+                if (g_run_ethmsb) RUN_ALGO_TRIAL(ethmsb, ethmsb_m);
+                if (g_run_three_pbs)
+                    run_three_pbs_micro_trial<P>(three_pbs_m, c0, c1, p0, p1,
+                                                 plain_bits, ek, *micro_pack,
+                                                 sk);
+#if HAVE_HE3DB_ORIGINAL
+                if (g_run_he3db) RUN_ALGO_TRIAL(HEDB, he3db_m);
+#endif
+            }
+
+            if (g_run_ethmsb)
+                print_results("ETHMSB+offset    (samplepaper)", ethmsb_m,
+                              num_test);
+            if (g_run_three_pbs)
+                print_results("Pruned 3-PBS optimized        ", three_pbs_m,
+                              num_test);
+#if HAVE_HE3DB_ORIGINAL
+            if (g_run_he3db)
+                print_results("HE3DB HomMSB     (original)   ", he3db_m,
+                              num_test);
+#endif
+        }
     }
 
 #undef RUN_ALGO_TRIAL
@@ -351,8 +643,17 @@ namespace
 
 int main(int argc, char **argv)
 {
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
     int num_test = 50;
     if (argc >= 2) num_test = std::stoi(argv[1]);
+    std::vector<uint32_t> bits_filter;
+    if (argc >= 3) bits_filter = parse_bits_filter(argv[2]);
+    if (argc >= 4) parse_ops_filter(argv[3]);
+    if (argc >= 5) parse_algo_filter(argv[4]);
+    const bool reuse_keys =
+        argc >= 6 && (std::string(argv[5]) == "reuse-keys" ||
+                      std::string(argv[5]) == "--reuse-keys");
 
     std::cout << "TFHEpp comparison benchmark\n";
     std::cout << "  Algorithms: ETHMSB+offset, Pruned 3-PBS optimized";
@@ -360,14 +661,27 @@ int main(int argc, char **argv)
     std::cout << ", HE3DB HomMSB";
 #else
     std::cout << "  (HE3DB original not available — set "
-                 "../HE3DB/src to enable)";
+                 "HE3DB_ORIGINAL_ROOT to enable)";
 #endif
     std::cout << "\n";
 
-    tlwelvl1_comparison_test(4, num_test);
-    tlwelvl1_comparison_test(5, num_test);
-    tlwelvl1_comparison_test(8, num_test);
-    tlwelvl2_comparison_test(16, num_test);
-    tlwelvl2_comparison_test(32, num_test);
+    if (reuse_keys) {
+        std::vector<uint32_t> lvl1_bits;
+        std::vector<uint32_t> lvl2_bits;
+        if (wants_bit(bits_filter, 4)) lvl1_bits.push_back(4);
+        if (wants_bit(bits_filter, 5)) lvl1_bits.push_back(5);
+        if (wants_bit(bits_filter, 8)) lvl1_bits.push_back(8);
+        if (wants_bit(bits_filter, 16)) lvl2_bits.push_back(16);
+        if (wants_bit(bits_filter, 32)) lvl2_bits.push_back(32);
+        tlwelvl1_reuse_key_suite(lvl1_bits, num_test);
+        tlwelvl2_reuse_key_suite(lvl2_bits, num_test);
+    }
+    else {
+        if (wants_bit(bits_filter, 4)) tlwelvl1_comparison_test(4, num_test);
+        if (wants_bit(bits_filter, 5)) tlwelvl1_comparison_test(5, num_test);
+        if (wants_bit(bits_filter, 8)) tlwelvl1_comparison_test(8, num_test);
+        if (wants_bit(bits_filter, 16)) tlwelvl2_comparison_test(16, num_test);
+        if (wants_bit(bits_filter, 32)) tlwelvl2_comparison_test(32, num_test);
+    }
     return 0;
 }

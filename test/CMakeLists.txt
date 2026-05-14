@@ -31,10 +31,12 @@ foreach(test_source ${test_sources})
 endforeach(test_source ${test_sources})
 
 # comparison/ benchmark — exercises ETHMSB, Pruned-3-PBS, and (optionally)
-# the original HE3DB HomMSB pipeline if HE3DB sources are found alongside
-# this repo (../HE3DB/src/HEDB/comparison/...).
+# the original HE3DB HomMSB pipeline if HE3DB sources are available.
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/comparison_test.cpp" AND TARGET tfhepp_compare)
-    set(_he3db_dir "${PROJECT_SOURCE_DIR}/../HE3DB/src")
+    set(HE3DB_ORIGINAL_ROOT
+        "${PROJECT_SOURCE_DIR}/../AE_submit/SOTA/HE3DB"
+        CACHE PATH "Original HE3DB checkout used for the comparison baseline")
+    set(_he3db_dir "${HE3DB_ORIGINAL_ROOT}/src")
     set(_he3db_extra_sources "")
     set(_he3db_extra_includes "")
     if(EXISTS "${_he3db_dir}/HEDB/comparison/extract_msb.cpp")
@@ -131,6 +133,14 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tpch_ch5_pruned_pipeline.cpp"
         tfhe++
         AES)
     target_compile_features(tpch_ch5_pruned_pipeline PRIVATE cxx_std_20)
+
+    add_executable(tpch_3pbs_q6_q14_q3_q5 tpch_ch5_pruned_pipeline.cpp)
+    target_link_libraries(tpch_3pbs_q6_q14_q3_q5
+        tfhepp_compare
+        tfhepp_ckks_repack
+        tfhe++
+        AES)
+    target_compile_features(tpch_3pbs_q6_q14_q3_q5 PRIVATE cxx_std_20)
 endif()
 
 

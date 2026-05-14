@@ -171,6 +171,7 @@ if(USE_RANDEN)
 endif()
 add_subdirectory(src)
 add_subdirectory(comparison)
+add_subdirectory(experimental)
 
 if(ENABLE_CKKS_REPACK)
   set(HE3DB_ROOT

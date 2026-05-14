@@ -1,0 +1,5 @@
+add_executable(my_clear_bit5_param_relax_probe EXCLUDE_FROM_ALL
+    clear_bit5_param_relax_probe.cpp)
+
+target_link_libraries(my_clear_bit5_param_relax_probe PRIVATE tfhe++)
+target_compile_features(my_clear_bit5_param_relax_probe PRIVATE cxx_std_20)

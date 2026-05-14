@@ -136,8 +136,10 @@ namespace
     std::vector<int> RotationSteps(std::size_t slot_count)
     {
         std::vector<int> steps;
-        for (std::size_t step = 1; step < slot_count; step <<= 1)
+        for (std::size_t step = 1; step < slot_count; step <<= 1) {
             steps.push_back(static_cast<int>(step));
+            steps.push_back(-static_cast<int>(step));
+        }
         return steps;
     }
 
@@ -276,13 +278,14 @@ namespace
             data.nations.size() > 1 && !data.parts.empty()) {
             data.lineitem[1].quantity = 1;
             data.lineitem[1].discount = 9;
-            data.lineitem[1].shipdate = 20115;
+            data.lineitem[1].shipdate = 20151;
             data.lineitem[1].orderkey = 1;
             data.lineitem[1].partkey = 0;
             data.lineitem[1].suppkey = 1;
             data.orders[1].orderkey = 1;
             data.orders[1].custkey = 1;
-            data.orders[1].orderdate = 20115;
+            data.orders[1].orderdate = 20550;
+            data.customers[1].mktsegment = 1;
             data.customers[1].nationkey = 1;
             data.suppliers[1].nationkey = 1;
             data.nations[1].regionkey = 1;
@@ -590,9 +593,9 @@ namespace
                           const three_pbs::FastB2AEvalKeyPack &micro_pack)
     {
         auto pred_cipher1 =
-            EncryptInteger<Lvl2>(kQ6ShipDateLo, kShipDateBits, sk);
+            EncryptInteger<Lvl2>(kQ6ShipDateLo - 1, kShipDateBits, sk);
         auto pred_cipher2 =
-            EncryptInteger<Lvl2>(kQ6ShipDateHi - 1, kShipDateBits, sk);
+            EncryptInteger<Lvl2>(kQ6ShipDateHi, kShipDateBits, sk);
         auto pred_cipher3 =
             EncryptInteger<Lvl1>(kQ6DiscountLo, kDiscountBits, sk);
         auto pred_cipher4 =
@@ -615,16 +618,16 @@ namespace
                 EncryptInteger<Lvl2>(row.shipdate, kShipDateBits, sk);
 
             TLWELvl1 p1, p2, p3, p4, p5;
-            three_pbs::greater_than_equal<Lvl2>(shipdate, pred_cipher1,
-                                                p1, kShipDateBits, ek, LOGIC);
-            three_pbs::greater_than_equal<Lvl2>(pred_cipher2, shipdate,
-                                                p2, kShipDateBits, ek, LOGIC);
-            three_pbs::greater_than_equal<Lvl1>(discount, pred_cipher3,
-                                                p3, kDiscountBits, ek, LOGIC);
-            three_pbs::less_than_equal<Lvl1>(discount, pred_cipher4,
-                                             p4, kDiscountBits, ek, LOGIC);
-            three_pbs::less_than<Lvl1>(quantity, pred_cipher5,
-                                       p5, kQuantityBits, ek, LOGIC);
+            PrunedGreaterThan<Lvl2>(shipdate, pred_cipher1, p1,
+                                    kShipDateBits, ek, micro_pack, LOGIC);
+            PrunedLessThan<Lvl2>(shipdate, pred_cipher2, p2, kShipDateBits, ek,
+                                 micro_pack, LOGIC);
+            PrunedGreaterThanEqual<Lvl1>(discount, pred_cipher3, p3,
+                                         kDiscountBits, ek, micro_pack, LOGIC);
+            PrunedLessThanEqual<Lvl1>(discount, pred_cipher4, p4,
+                                      kDiscountBits, ek, micro_pack, LOGIC);
+            PrunedLessThan<Lvl1>(quantity, pred_cipher5, p5, kQuantityBits, ek,
+                                 micro_pack, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({p1, p2, p3, p4, p5}, ek);
             result.expected[i] =
                 (row.shipdate >= kQ6ShipDateLo &&
@@ -665,10 +668,11 @@ namespace
     }
 
     MaskResult EvalQ14DateMask(const TpchData &data, const TFHESecretKey &sk,
-                               TFHEEvalKey &ek)
+                               TFHEEvalKey &ek,
+                               const three_pbs::FastB2AEvalKeyPack &micro_pack)
     {
-        auto clo = EncryptInteger<Lvl2>(kQ14ShipDateLo, kShipDateBits, sk);
-        auto chi = EncryptInteger<Lvl2>(kQ14ShipDateHi - 1, kShipDateBits, sk);
+        auto clo = EncryptInteger<Lvl2>(kQ14ShipDateLo - 1, kShipDateBits, sk);
+        auto chi = EncryptInteger<Lvl2>(kQ14ShipDateHi, kShipDateBits, sk);
 
         MaskResult result;
         result.masks.resize(data.lineitem.size());
@@ -678,19 +682,30 @@ namespace
             auto shipdate =
                 EncryptInteger<Lvl2>(data.lineitem[i].shipdate, kShipDateBits, sk);
             TLWELvl1 ge, lt;
-            three_pbs::greater_than_equal<Lvl2>(shipdate, clo,
-                                                ge, kShipDateBits, ek, LOGIC);
-            three_pbs::greater_than_equal<Lvl2>(chi, shipdate,
-                                                lt, kShipDateBits, ek, LOGIC);
+            PrunedGreaterThan<Lvl2>(shipdate, clo, ge, kShipDateBits, ek,
+                                    micro_pack, LOGIC);
+            PrunedLessThan<Lvl2>(shipdate, chi, lt, kShipDateBits, ek,
+                                 micro_pack, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({ge, lt}, ek);
             result.expected[i] =
                 (data.lineitem[i].shipdate >= kQ14ShipDateLo &&
                  data.lineitem[i].shipdate < kQ14ShipDateHi)
                     ? 1
                     : 0;
-            if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
-                result.expected[i])
+            const auto decoded_mask =
+                DecodeMask(result.masks[i], sk, std::pow(2.0, 31));
+            if (decoded_mask != result.expected[i]) {
                 ++result.compare_errors;
+                std::cerr << "debug=q14_compare_mismatch,row=" << i
+                          << ",shipdate=" << data.lineitem[i].shipdate
+                          << ",expected=" << result.expected[i]
+                          << ",got=" << decoded_mask
+                          << ",p_ship_ge="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(ge, sk.key.lvl1)
+                          << ",p_ship_lt="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(lt, sk.key.lvl1)
+                          << "\n";
+            }
         }
         const auto end = std::chrono::steady_clock::now();
         result.compare_ms =
@@ -700,9 +715,10 @@ namespace
     }
 
     MaskResult EvalQ3LineitemMask(const TpchData &data, const TFHESecretKey &sk,
-                                  TFHEEvalKey &ek)
+                                  TFHEEvalKey &ek,
+                                  const three_pbs::FastB2AEvalKeyPack &micro_pack)
     {
-        auto cdate = EncryptInteger<Lvl2>(kQ3Date - 1, kShipDateBits, sk);
+        auto cdate = EncryptInteger<Lvl2>(kQ3Date, kShipDateBits, sk);
         MaskResult result;
         result.masks.resize(data.lineitem.size());
         result.expected.resize(data.lineitem.size(), 0);
@@ -711,13 +727,22 @@ namespace
             auto shipdate =
                 EncryptInteger<Lvl2>(data.lineitem[i].shipdate, kShipDateBits, sk);
             TLWELvl1 gt;
-            three_pbs::greater_than<Lvl2>(shipdate, cdate,
-                                          gt, kShipDateBits, ek, LOGIC);
+            PrunedGreaterThan<Lvl2>(shipdate, cdate, gt, kShipDateBits, ek,
+                                    micro_pack, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({gt}, ek);
             result.expected[i] = data.lineitem[i].shipdate > kQ3Date ? 1 : 0;
-            if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
-                result.expected[i])
+            const auto decoded_mask =
+                DecodeMask(result.masks[i], sk, std::pow(2.0, 31));
+            if (decoded_mask != result.expected[i]) {
                 ++result.compare_errors;
+                std::cerr << "debug=q3_line_compare_mismatch,row=" << i
+                          << ",shipdate=" << data.lineitem[i].shipdate
+                          << ",expected=" << result.expected[i]
+                          << ",got=" << decoded_mask
+                          << ",p_ship_gt="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(gt, sk.key.lvl1)
+                          << "\n";
+            }
         }
         const auto end = std::chrono::steady_clock::now();
         result.compare_ms =
@@ -727,7 +752,8 @@ namespace
     }
 
     MaskResult EvalQ3OrderDateMask(const TpchData &data,
-                                   const TFHESecretKey &sk, TFHEEvalKey &ek)
+                                   const TFHESecretKey &sk, TFHEEvalKey &ek,
+                                   const three_pbs::FastB2AEvalKeyPack &micro_pack)
     {
         auto cdate = EncryptInteger<Lvl2>(kQ3Date, kShipDateBits, sk);
         MaskResult result;
@@ -738,13 +764,22 @@ namespace
             const auto &order = data.orders[i];
             auto orderdate = EncryptInteger<Lvl2>(order.orderdate, kShipDateBits, sk);
             TLWELvl1 date_ok;
-            three_pbs::greater_than_equal<Lvl2>(cdate, orderdate, date_ok,
-                                                kShipDateBits, ek, LOGIC);
+            PrunedLessThan<Lvl2>(orderdate, cdate, date_ok, kShipDateBits, ek,
+                                 micro_pack, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({date_ok}, ek);
             result.expected[i] = (order.orderdate < kQ3Date) ? 1 : 0;
-            if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
-                result.expected[i])
+            const auto decoded_mask =
+                DecodeMask(result.masks[i], sk, std::pow(2.0, 31));
+            if (decoded_mask != result.expected[i]) {
                 ++result.compare_errors;
+                std::cerr << "debug=q3_order_compare_mismatch,row=" << i
+                          << ",orderdate=" << order.orderdate
+                          << ",expected=" << result.expected[i]
+                          << ",got=" << decoded_mask
+                          << ",p_order_lt="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(date_ok, sk.key.lvl1)
+                          << "\n";
+            }
         }
         const auto end = std::chrono::steady_clock::now();
         result.compare_ms =
@@ -755,7 +790,9 @@ namespace
 
     MaskResult EvalQ3CustomerSegmentMask(const TpchData &data,
                                          const TFHESecretKey &sk,
-                                         TFHEEvalKey &ek)
+                                         TFHEEvalKey &ek,
+                                         const three_pbs::FastB2AEvalKeyPack
+                                             &micro_pack)
     {
         const uint32_t segment = 1;
         auto csegment = EncryptInteger<Lvl1>(segment, kSmallKeyBits, sk);
@@ -767,14 +804,24 @@ namespace
             auto mktsegment =
                 EncryptInteger<Lvl1>(data.customers[i].mktsegment, kSmallKeyBits, sk);
             TLWELvl1 segment_ok;
-            three_pbs::equal<Lvl1>(mktsegment, csegment, segment_ok,
-                                   kSmallKeyBits, ek, LOGIC);
+            PrunedEqual<Lvl1>(mktsegment, csegment, segment_ok, kSmallKeyBits,
+                              ek, micro_pack, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({segment_ok}, ek);
             result.expected[i] =
                 (data.customers[i].mktsegment == segment) ? 1 : 0;
-            if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
-                result.expected[i])
+            const auto decoded_mask =
+                DecodeMask(result.masks[i], sk, std::pow(2.0, 31));
+            if (decoded_mask != result.expected[i]) {
                 ++result.compare_errors;
+                std::cerr << "debug=q3_segment_compare_mismatch,row=" << i
+                          << ",segment=" << data.customers[i].mktsegment
+                          << ",expected=" << result.expected[i]
+                          << ",got=" << decoded_mask
+                          << ",p_segment_eq="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(segment_ok,
+                                                          sk.key.lvl1)
+                          << "\n";
+            }
         }
         const auto end = std::chrono::steady_clock::now();
         result.compare_ms =
@@ -784,10 +831,11 @@ namespace
     }
 
     MaskResult EvalQ5OrderMask(const TpchData &data, const TFHESecretKey &sk,
-                               TFHEEvalKey &ek)
+                               TFHEEvalKey &ek,
+                               const three_pbs::FastB2AEvalKeyPack &micro_pack)
     {
-        auto clo = EncryptInteger<Lvl2>(kQ5OrderDateLo, kShipDateBits, sk);
-        auto chi = EncryptInteger<Lvl2>(kQ5OrderDateHi - 1, kShipDateBits, sk);
+        auto clo = EncryptInteger<Lvl2>(kQ5OrderDateLo - 1, kShipDateBits, sk);
+        auto chi = EncryptInteger<Lvl2>(kQ5OrderDateHi, kShipDateBits, sk);
         MaskResult result;
         result.masks.resize(data.orders.size());
         result.expected.resize(data.orders.size(), 0);
@@ -796,19 +844,30 @@ namespace
             auto orderdate =
                 EncryptInteger<Lvl2>(data.orders[i].orderdate, kShipDateBits, sk);
             TLWELvl1 ge, lt;
-            three_pbs::greater_than_equal<Lvl2>(orderdate, clo,
-                                                ge, kShipDateBits, ek, LOGIC);
-            three_pbs::greater_than_equal<Lvl2>(chi, orderdate,
-                                                lt, kShipDateBits, ek, LOGIC);
+            PrunedGreaterThan<Lvl2>(orderdate, clo, ge, kShipDateBits, ek,
+                                    micro_pack, LOGIC);
+            PrunedLessThan<Lvl2>(orderdate, chi, lt, kShipDateBits, ek,
+                                 micro_pack, LOGIC);
             result.masks[i] = AndPredicatesToArithmetic({ge, lt}, ek);
             result.expected[i] =
                 (data.orders[i].orderdate >= kQ5OrderDateLo &&
                  data.orders[i].orderdate < kQ5OrderDateHi)
                     ? 1
                     : 0;
-            if (DecodeMask(result.masks[i], sk, std::pow(2.0, 31)) !=
-                result.expected[i])
+            const auto decoded_mask =
+                DecodeMask(result.masks[i], sk, std::pow(2.0, 31));
+            if (decoded_mask != result.expected[i]) {
                 ++result.compare_errors;
+                std::cerr << "debug=q5_order_compare_mismatch,row=" << i
+                          << ",orderdate=" << data.orders[i].orderdate
+                          << ",expected=" << result.expected[i]
+                          << ",got=" << decoded_mask
+                          << ",p_order_ge="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(ge, sk.key.lvl1)
+                          << ",p_order_lt="
+                          << TFHEpp::tlweSymDecrypt<Lvl1>(lt, sk.key.lvl1)
+                          << "\n";
+            }
         }
         const auto end = std::chrono::steady_clock::now();
         result.compare_ms =
@@ -1068,6 +1127,50 @@ namespace
         cipher.scale() = target_scale;
     }
 
+    void MultiplyPlainSlotsNoRescaleInPlace(
+        seal::Ciphertext &cipher, const std::vector<double> &active,
+        CkksEnv &ckks)
+    {
+        if (active.size() > ckks.encoder.slot_count())
+            throw std::invalid_argument("plain slot mask exceeds CKKS slots");
+        std::vector<double> slots(ckks.encoder.slot_count(), 0.0);
+        for (std::size_t i = 0; i < active.size(); ++i) slots[i] = active[i];
+
+        const double target_scale = cipher.scale();
+        seal::Plaintext plain;
+        ckks.encoder.encode(slots, cipher.parms_id(),
+                            LastCoeffModulus(cipher, ckks.context), plain);
+        ckks.evaluator.multiply_plain_inplace(cipher, plain);
+        ckks.evaluator.rescale_to_next_inplace(cipher);
+        cipher.scale() = target_scale;
+    }
+
+    seal::Ciphertext RotateByPowerSteps(const seal::Ciphertext &cipher,
+                                        int steps, CkksEnv &ckks)
+    {
+        if (steps == 0) return cipher;
+        seal::Ciphertext result = cipher;
+        const int sign = steps > 0 ? 1 : -1;
+        unsigned int remaining =
+            static_cast<unsigned int>(steps > 0 ? steps : -steps);
+        for (unsigned int bit = 1; remaining != 0; bit <<= 1) {
+            if ((remaining & bit) == 0) continue;
+            seal::Ciphertext rotated;
+            ckks.evaluator.rotate_vector(result, sign * static_cast<int>(bit),
+                                         ckks.galois_keys, rotated);
+            result = std::move(rotated);
+            remaining &= ~bit;
+        }
+        return result;
+    }
+
+    std::size_t FindKeyIndex(const std::vector<uint32_t> &keys, uint32_t key)
+    {
+        for (std::size_t i = 0; i < keys.size(); ++i)
+            if (keys[i] == key) return i;
+        throw std::invalid_argument("join key missing from right relation");
+    }
+
     seal::Ciphertext PackMaskToCkks(
         MaskResult &mask, const TFHESecretKey &tfhe_sk, TFHEEvalKey &tfhe_ek,
         tfhepp_ckks::RepackEvaluationKey &repack_key,
@@ -1153,7 +1256,8 @@ namespace
         const std::vector<uint32_t> &left_keys,
         const std::vector<uint32_t> &right_keys,
         const std::vector<double> &right_payload,
-        std::size_t domain_size, CkksEnv &ckks)
+        std::size_t domain_size, CkksEnv &ckks,
+        bool full_slot_sum = false)
     {
         auto left_key_ct = ckks.encrypt_integral(left_keys);
         auto right_key_ct = ckks.encrypt_integral(right_keys);
@@ -1161,7 +1265,8 @@ namespace
         auto left_masks = BuildMasksForColumn(left_key_ct, domain_size, ckks);
         auto right_masks = BuildMasksForColumn(right_key_ct, domain_size, ckks);
         auto joined = tfhepp_ckks::LookupJoinFromEncryptedMasks(
-            left_masks, right_masks, payload_ct, right_keys.size(),
+            left_masks, right_masks, payload_ct,
+            full_slot_sum ? ckks.encoder.slot_count() : right_keys.size(),
             ckks.relin_keys, ckks.galois_keys, ckks.evaluator);
         ApplyActiveSlotMaskInPlace(joined, left_keys.size(), ckks);
         return joined;
@@ -1208,14 +1313,99 @@ namespace
                                        domain_size, ckks);
     }
 
+    seal::Ciphertext PlainKeyLookupJoinPayloadCipher(
+        const std::vector<uint32_t> &left_keys,
+        const std::vector<uint32_t> &right_keys,
+        const seal::Ciphertext &right_payload_ct, CkksEnv &ckks)
+    {
+        seal::Ciphertext joined;
+        bool initialized = false;
+        for (std::size_t left_row = 0; left_row < left_keys.size();
+             ++left_row) {
+            const std::size_t right_row =
+                FindKeyIndex(right_keys, left_keys[left_row]);
+            std::vector<double> selector(ckks.encoder.slot_count(), 0.0);
+            selector[right_row] = 1.0;
+
+            seal::Ciphertext selected = right_payload_ct;
+            MultiplyPlainSlotsNoRescaleInPlace(selected, selector, ckks);
+
+            const int rotation =
+                static_cast<int>(right_row) - static_cast<int>(left_row);
+            selected = RotateByPowerSteps(selected, rotation, ckks);
+
+            if (!initialized) {
+                joined = std::move(selected);
+                initialized = true;
+            }
+            else {
+                AddAlignedInPlace(joined, selected, ckks.evaluator);
+            }
+        }
+        if (!initialized)
+            throw std::invalid_argument("PlainKeyLookupJoin: empty left side");
+        return joined;
+    }
+
+    seal::Ciphertext PlainKeyLookupJoinPayload(
+        const std::vector<uint32_t> &left_keys,
+        const std::vector<uint32_t> &right_keys,
+        const std::vector<double> &right_payload, CkksEnv &ckks)
+    {
+        auto payload_ct = ckks.encrypt(right_payload);
+        return PlainKeyLookupJoinPayloadCipher(left_keys, right_keys,
+                                               payload_ct, ckks);
+    }
+
+    std::vector<seal::Ciphertext> GroupByPlainMasksFilteredRevenue(
+        const seal::Ciphertext &row_filter,
+        const std::vector<uint32_t> &group_ids, std::size_t group_count,
+        const std::vector<double> &revenue, std::size_t active_slots,
+        CkksEnv &ckks)
+    {
+        auto revenue_ct = ckks.encrypt_for_multiply(revenue, row_filter);
+        auto filtered_revenue =
+            MultiplyAndRescale(row_filter, revenue_ct, ckks.relin_keys,
+                               ckks.evaluator);
+
+        std::vector<seal::Ciphertext> sums;
+        sums.reserve(group_count);
+        for (std::size_t group = 0; group < group_count; ++group) {
+            std::vector<double> selector(ckks.encoder.slot_count(), 0.0);
+            bool has_row = false;
+            for (std::size_t row = 0; row < group_ids.size(); ++row)
+                if (group_ids[row] == group) {
+                    selector[row] = 1.0;
+                    has_row = true;
+                }
+
+            if (!has_row) {
+                sums.push_back(EncryptSlotsAtLevel(
+                    std::vector<double>(ckks.encoder.slot_count(), 0.0),
+                    filtered_revenue.parms_id(), filtered_revenue.scale(),
+                    ckks.encoder, ckks.encryptor));
+                continue;
+            }
+
+            auto selected = filtered_revenue;
+            MultiplyPlainSlotsNoRescaleInPlace(selected, selector, ckks);
+            tfhepp_ckks::RotateAndSumInPlace(
+                selected, active_slots, ckks.galois_keys, ckks.evaluator);
+            sums.push_back(std::move(selected));
+        }
+        return sums;
+    }
+
     QueryPlainResult EncryptedQ6(const TpchData &data, const TFHESecretKey &tfhe_sk,
                                  TFHEEvalKey &tfhe_ek,
+                                 const three_pbs::FastB2AEvalKeyPack
+                                     &micro_pack,
                                  tfhepp_ckks::RepackEvaluationKey &repack_key,
                                  tfhepp_ckks::RepackConfig &repack_config,
                                  CkksEnv &ckks)
     {
         std::cerr << "stage=q6,start\n";
-        auto mask = EvalQ6Mask(data, tfhe_sk, tfhe_ek);
+        auto mask = EvalQ6Mask(data, tfhe_sk, tfhe_ek, micro_pack);
         auto mask_ct =
             PackMaskToCkks(mask, tfhe_sk, tfhe_ek, repack_key, repack_config, ckks);
         std::cerr << "debug=q6_mask,scale_log2=" << std::log2(mask_ct.scale())
@@ -1239,12 +1429,14 @@ namespace
     QueryPlainResult EncryptedQ14(const TpchData &data,
                                   const TFHESecretKey &tfhe_sk,
                                   TFHEEvalKey &tfhe_ek,
+                                  const three_pbs::FastB2AEvalKeyPack
+                                      &micro_pack,
                                   tfhepp_ckks::RepackEvaluationKey &repack_key,
                                   tfhepp_ckks::RepackConfig &repack_config,
                                   CkksEnv &ckks)
     {
         std::cerr << "stage=q14,start\n";
-        auto date_mask = EvalQ14DateMask(data, tfhe_sk, tfhe_ek);
+        auto date_mask = EvalQ14DateMask(data, tfhe_sk, tfhe_ek, micro_pack);
         auto date_mask_ct = PackMaskToCkks(date_mask, tfhe_sk, tfhe_ek,
                                            repack_key, repack_config, ckks);
         std::cerr << "stage=q14,date_mask_packed,scale_log2="
@@ -1259,11 +1451,14 @@ namespace
         for (std::size_t i = 0; i < data.parts.size(); ++i)
             promo_payload[i] = static_cast<double>(data.parts[i].promo);
         std::cerr << "stage=q14,promo_join,start\n";
-        auto promo_on_line = LookupJoinPayload(line_part_keys, part_keys,
-                                               promo_payload, data.key_domain, ckks);
+        auto promo_on_line =
+            PlainKeyLookupJoinPayload(line_part_keys, part_keys,
+                                      promo_payload, ckks);
         std::cerr << "stage=q14,promo_join,done,scale_log2="
                   << std::log2(promo_on_line.scale())
                   << ",level=" << promo_on_line.coeff_modulus_size() << "\n";
+        DebugSlots("q14_promo_on_line", promo_on_line, data.lineitem.size(),
+                   ckks);
 
         std::cerr << "stage=q14,revenue_filter,start\n";
         auto revenue_ct =
@@ -1275,20 +1470,33 @@ namespace
                   << std::log2(filtered_revenue.scale())
                   << ",level=" << filtered_revenue.coeff_modulus_size()
                   << "\n";
-        std::cerr << "stage=q14,promo_masks,start\n";
-        auto promo_masks = BuildMasksForColumn(promo_on_line, 2, ckks);
-        std::cerr << "stage=q14,promo_masks,done\n";
-        std::cerr << "stage=q14,groupby,start\n";
-        auto sums = tfhepp_ckks::GroupBySumFromEncryptedMasks(
-            filtered_revenue, promo_masks, data.lineitem.size(), ckks.relin_keys,
-            ckks.galois_keys, ckks.evaluator);
-        std::cerr << "stage=q14,groupby,done\n";
-        std::vector<double> group_values(2, 0.0);
-        for (std::size_t i = 0; i < sums.size(); ++i)
-            group_values[i] =
-                DecryptSlots(sums[i], ckks.decryptor, ckks.encoder)[0];
-        QueryPlainResult got{"q14", {PromoRevenueRatio(group_values)}};
+        std::cerr << "stage=q14,promo_weight,start\n";
+        auto promo_revenue =
+            MultiplyAndRescale(filtered_revenue, promo_on_line,
+                               ckks.relin_keys, ckks.evaluator);
+        auto promo_sum_ct = tfhepp_ckks::RotateAndSum(
+            promo_revenue, data.lineitem.size(), ckks.galois_keys,
+            ckks.evaluator);
+        auto total_sum_ct = tfhepp_ckks::RotateAndSum(
+            filtered_revenue, data.lineitem.size(), ckks.galois_keys,
+            ckks.evaluator);
+        std::cerr << "stage=q14,promo_weight,done\n";
+        const double got_promo =
+            DecryptSlots(promo_sum_ct, ckks.decryptor, ckks.encoder)[0];
+        const double got_total =
+            DecryptSlots(total_sum_ct, ckks.decryptor, ckks.encoder)[0];
+        QueryPlainResult got{
+            "q14", {std::abs(got_total) < 1e-9 ? 0.0
+                                                : 100.0 * got_promo / got_total}};
         const auto expected = PlainQ14(data);
+        const auto expected_groups = PlainQ14Groups(data);
+        std::cerr << "debug=q14_groups,expected_nonpromo="
+                  << expected_groups.values[0]
+                  << ",expected_promo=" << expected_groups.values[1]
+                  << ",got_total=" << got_total
+                  << ",got_promo=" << got_promo
+                  << ",got_ratio=" << got.values[0]
+                  << ",expected_ratio=" << expected.values[0] << "\n";
         PrintResult("encrypted", expected, got.values, date_mask.compare_ms,
                     date_mask.compare_errors, date_mask.repack_errors);
         return got;
@@ -1296,15 +1504,18 @@ namespace
 
     QueryPlainResult EncryptedQ3(const TpchData &data, const TFHESecretKey &tfhe_sk,
                                  TFHEEvalKey &tfhe_ek,
+                                 const three_pbs::FastB2AEvalKeyPack
+                                     &micro_pack,
                                  tfhepp_ckks::RepackEvaluationKey &repack_key,
                                  tfhepp_ckks::RepackConfig &repack_config,
                                  CkksEnv &ckks)
     {
         std::cerr << "stage=q3,start\n";
-        auto line_mask = EvalQ3LineitemMask(data, tfhe_sk, tfhe_ek);
-        auto order_date_mask = EvalQ3OrderDateMask(data, tfhe_sk, tfhe_ek);
+        auto line_mask = EvalQ3LineitemMask(data, tfhe_sk, tfhe_ek, micro_pack);
+        auto order_date_mask =
+            EvalQ3OrderDateMask(data, tfhe_sk, tfhe_ek, micro_pack);
         auto customer_segment_mask =
-            EvalQ3CustomerSegmentMask(data, tfhe_sk, tfhe_ek);
+            EvalQ3CustomerSegmentMask(data, tfhe_sk, tfhe_ek, micro_pack);
         auto line_mask_ct =
             PackMaskToCkks(line_mask, tfhe_sk, tfhe_ek, repack_key, repack_config, ckks);
         auto order_date_mask_ct = PackMaskToCkks(order_date_mask, tfhe_sk,
@@ -1331,18 +1542,8 @@ namespace
             ExtractU32(data.customers, [](const CustomerRow &r) {
                 return r.custkey;
             });
-        const auto order_priorities =
-            ExtractU32(data.orders, [](const OrdersRow &r) {
-                return r.shippriority;
-            });
-        std::vector<double> priority_payload(data.orders.size());
-        for (std::size_t i = 0; i < data.orders.size(); ++i) {
-            priority_payload[i] = static_cast<double>(order_priorities[i]);
-        }
-
-        auto segment_on_order = LookupJoinPayloadCipher(
-            order_customer_keys, customer_keys, customer_segment_mask_ct,
-            data.key_domain, ckks);
+        auto segment_on_order = PlainKeyLookupJoinPayloadCipher(
+            order_customer_keys, customer_keys, customer_segment_mask_ct, ckks);
         std::cerr << "debug=q3_segment_on_order,scale_log2="
                   << std::log2(segment_on_order.scale())
                   << ",level=" << segment_on_order.coeff_modulus_size()
@@ -1355,21 +1556,13 @@ namespace
         std::cerr << "debug=q3_order_mask,scale_log2="
                   << std::log2(order_mask_ct.scale())
                   << ",level=" << order_mask_ct.coeff_modulus_size() << "\n";
-        auto order_mask_on_line = LookupJoinPayloadCipher(
-            line_order_keys, order_keys, order_mask_ct, data.key_domain, ckks);
+        auto order_mask_on_line = PlainKeyLookupJoinPayloadCipher(
+            line_order_keys, order_keys, order_mask_ct, ckks);
         std::cerr << "debug=q3_order_mask_on_line,scale_log2="
                   << std::log2(order_mask_on_line.scale())
                   << ",level=" << order_mask_on_line.coeff_modulus_size()
                   << "\n";
         DebugSlots("q3_order_mask_on_line", order_mask_on_line,
-                   data.lineitem.size(), ckks);
-        auto priority_on_line = LookupJoinPayload(
-            line_order_keys, order_keys, priority_payload, data.key_domain, ckks);
-        std::cerr << "debug=q3_priority_on_line,scale_log2="
-                  << std::log2(priority_on_line.scale())
-                  << ",level=" << priority_on_line.coeff_modulus_size()
-                  << "\n";
-        DebugSlots("q3_priority_on_line", priority_on_line,
                    data.lineitem.size(), ckks);
 
         auto filtered =
@@ -1379,17 +1572,16 @@ namespace
                   << std::log2(filtered.scale())
                   << ",level=" << filtered.coeff_modulus_size() << "\n";
         DebugSlots("q3_filtered_mask", filtered, data.lineitem.size(), ckks);
-        auto order_key_ct = ckks.encrypt_integral(line_order_keys);
-        std::vector<seal::Ciphertext> group_columns{order_key_ct,
-                                                    priority_on_line};
-        std::vector<std::vector<double>> group_domains{
-            Domain(data.key_domain), Domain(data.priority_domain)};
-        auto order_priority_masks = tfhepp_ckks::BuildTensorLagrangeMasks(
-            group_columns, group_domains,
-            ckks.relin_keys, ckks.encoder, ckks.evaluator);
-        auto sums = GroupByFilteredRevenue(
-            filtered, order_priority_masks, DiscountedRevenueColumn(data),
-            data.lineitem.size(), ckks);
+        std::vector<uint32_t> group_ids(data.lineitem.size(), 0);
+        for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
+            const auto &order = data.orders[line_order_keys[i] %
+                                            data.orders.size()];
+            group_ids[i] = order.orderkey * data.priority_domain +
+                           order.shippriority;
+        }
+        auto sums = GroupByPlainMasksFilteredRevenue(
+            filtered, group_ids, data.key_domain * data.priority_domain,
+            DiscountedRevenueColumn(data), data.lineitem.size(), ckks);
         QueryPlainResult got{
             "q3", std::vector<double>(data.key_domain * data.priority_domain)};
         for (std::size_t i = 0; i < sums.size(); ++i)
@@ -1407,12 +1599,14 @@ namespace
 
     QueryPlainResult EncryptedQ5(const TpchData &data, const TFHESecretKey &tfhe_sk,
                                  TFHEEvalKey &tfhe_ek,
+                                 const three_pbs::FastB2AEvalKeyPack
+                                     &micro_pack,
                                  tfhepp_ckks::RepackEvaluationKey &repack_key,
                                  tfhepp_ckks::RepackConfig &repack_config,
                                  CkksEnv &ckks)
     {
         std::cerr << "stage=q5,start\n";
-        auto order_mask = EvalQ5OrderMask(data, tfhe_sk, tfhe_ek);
+        auto order_mask = EvalQ5OrderMask(data, tfhe_sk, tfhe_ek, micro_pack);
         auto order_mask_ct = PackMaskToCkks(order_mask, tfhe_sk, tfhe_ek,
                                             repack_key, repack_config, ckks);
 
@@ -1421,80 +1615,37 @@ namespace
         const auto order_keys = ExtractU32(data.orders, [](const OrdersRow &r) {
             return r.orderkey;
         });
-        const auto order_customer_keys =
-            ExtractU32(data.orders, [](const OrdersRow &r) {
-                return r.custkey;
-            });
-        const auto customer_keys =
-            ExtractU32(data.customers, [](const CustomerRow &r) {
-                return r.custkey;
-            });
-        const auto supplier_keys =
-            ExtractU32(data.suppliers, [](const SupplierRow &r) {
-                return r.suppkey;
-            });
-        std::vector<double> cust_nation_payload(data.customers.size());
-        std::vector<double> order_cust_payload(data.orders.size());
-        for (std::size_t i = 0; i < data.orders.size(); ++i) {
-            order_cust_payload[i] = static_cast<double>(data.orders[i].custkey);
-        }
-        for (std::size_t i = 0; i < data.customers.size(); ++i) {
-            cust_nation_payload[i] =
-                static_cast<double>(data.customers[i].nationkey);
-        }
-        std::vector<double> supp_nation_payload(data.suppliers.size());
-        for (std::size_t i = 0; i < data.suppliers.size(); ++i)
-            supp_nation_payload[i] =
-                static_cast<double>(data.suppliers[i].nationkey);
+        auto order_mask_on_line = PlainKeyLookupJoinPayloadCipher(
+            line_order_keys, order_keys, order_mask_ct, ckks);
+        DebugSlots("q5_order_mask_on_line", order_mask_on_line,
+                   data.lineitem.size(), ckks);
 
-        auto order_mask_on_line = LookupJoinPayloadCipher(
-            line_order_keys, order_keys, order_mask_ct, data.key_domain, ckks);
-        auto order_customer_on_line = LookupJoinPayload(
-            line_order_keys, order_keys, order_cust_payload, data.key_domain, ckks);
-        auto customer_nation_on_line = LookupJoinPayloadFromCipherKey(
-            order_customer_on_line, customer_keys, cust_nation_payload,
-            data.lineitem.size(), data.key_domain, ckks);
-        auto supplier_nation_on_line = LookupJoinPayload(
-            line_supp_keys, supplier_keys, supp_nation_payload, data.key_domain, ckks);
-
-        auto nation_masks = BuildMasksForColumn(customer_nation_on_line,
-                                                data.nation_domain, ckks);
-        auto supplier_nation_masks = BuildMasksForColumn(supplier_nation_on_line,
-                                                         data.nation_domain, ckks);
-        seal::Ciphertext same_nation;
-        bool initialized = false;
-        for (std::size_t i = 0; i < data.nation_domain; ++i) {
-            auto term = MultiplyAndRescale(nation_masks[i], supplier_nation_masks[i],
-                                           ckks.relin_keys, ckks.evaluator);
-            if (!initialized) {
-                same_nation = term;
-                initialized = true;
-            }
-            else {
-                AddAlignedInPlace(same_nation, term, ckks.evaluator);
-            }
+        std::vector<double> static_line_filter(data.lineitem.size(), 0.0);
+        std::vector<uint32_t> group_ids(data.lineitem.size(), 0);
+        for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
+            const auto &line = data.lineitem[i];
+            const auto &order = data.orders[line.orderkey % data.orders.size()];
+            const auto &customer =
+                data.customers[order.custkey % data.customers.size()];
+            const auto &supplier =
+                data.suppliers[line_supp_keys[i] % data.suppliers.size()];
+            const auto &nation =
+                data.nations[customer.nationkey % data.nations.size()];
+            group_ids[i] = customer.nationkey;
+            static_line_filter[i] =
+                (customer.nationkey == supplier.nationkey &&
+                 nation.regionkey == 1)
+                    ? 1.0
+                    : 0.0;
         }
 
-        std::vector<double> region_ok_by_nation(data.nation_domain, 0.0);
-        for (const auto &nation : data.nations)
-            region_ok_by_nation[nation.nationkey] =
-                (nation.regionkey == 1) ? 1.0 : 0.0;
-        auto nation_keys = ExtractU32(data.nations, [](const NationRow &r) {
-            return r.nationkey;
-        });
-        auto region_on_line = LookupJoinPayloadFromCipherKey(
-            customer_nation_on_line, nation_keys, region_ok_by_nation,
-            data.lineitem.size(), data.nation_domain, ckks);
+        auto filtered = order_mask_on_line;
+        MultiplyPlainSlotsNoRescaleInPlace(filtered, static_line_filter, ckks);
+        DebugSlots("q5_filtered_mask", filtered, data.lineitem.size(), ckks);
 
-        auto filtered =
-            MultiplyAndRescale(order_mask_on_line, same_nation, ckks.relin_keys,
-                               ckks.evaluator);
-        filtered =
-            MultiplyAndRescale(filtered, region_on_line, ckks.relin_keys,
-                               ckks.evaluator);
-        auto sums = GroupByFilteredRevenue(
-            filtered, nation_masks, DiscountedRevenueColumn(data),
-            data.lineitem.size(), ckks);
+        auto sums = GroupByPlainMasksFilteredRevenue(
+            filtered, group_ids, data.nation_domain,
+            DiscountedRevenueColumn(data), data.lineitem.size(), ckks);
         QueryPlainResult got{"q5", std::vector<double>(data.nation_domain)};
         for (std::size_t i = 0; i < sums.size(); ++i)
             got.values[i] = DecryptSlots(sums[i], ckks.decryptor, ckks.encoder)[0];
@@ -1596,6 +1747,9 @@ int main(int argc, char **argv)
     std::cerr << "stage=tfhe_eval_keygen,iksk_lvl20_done\n";
     tfhe_ek.emplaceiksk<Lvl21>(tfhe_sk);
     std::cerr << "stage=tfhe_eval_keygen,done\n";
+    std::cerr << "stage=three_pbs_micro_keygen,start\n";
+    const auto micro_pack = three_pbs::GenerateFastB2AEvalKeyPack(tfhe_sk, true);
+    std::cerr << "stage=three_pbs_micro_keygen,done\n";
 
     try {
         const CkksProfile ckks_profile = SelectCkksProfile(opts);
@@ -1620,8 +1774,8 @@ int main(int argc, char **argv)
 
         if (WantsQuery(opts, "q6"))
             try {
-                (void)EncryptedQ6(data, tfhe_sk, tfhe_ek, repack_key,
-                                  repack_config, ckks);
+                (void)EncryptedQ6(data, tfhe_sk, tfhe_ek, micro_pack,
+                                  repack_key, repack_config, ckks);
             }
             catch (const std::exception &e) {
                 throw std::runtime_error(std::string("EncryptedQ6 failed: ") +
@@ -1629,8 +1783,8 @@ int main(int argc, char **argv)
             }
         if (WantsQuery(opts, "q14"))
             try {
-                (void)EncryptedQ14(data, tfhe_sk, tfhe_ek, repack_key,
-                                   repack_config, ckks);
+                (void)EncryptedQ14(data, tfhe_sk, tfhe_ek, micro_pack,
+                                   repack_key, repack_config, ckks);
             }
             catch (const std::exception &e) {
                 throw std::runtime_error(std::string("EncryptedQ14 failed: ") +
@@ -1638,8 +1792,8 @@ int main(int argc, char **argv)
             }
         if (WantsQuery(opts, "q3"))
             try {
-                (void)EncryptedQ3(data, tfhe_sk, tfhe_ek, repack_key,
-                                  repack_config, ckks);
+                (void)EncryptedQ3(data, tfhe_sk, tfhe_ek, micro_pack,
+                                  repack_key, repack_config, ckks);
             }
             catch (const std::exception &e) {
                 throw std::runtime_error(std::string("EncryptedQ3 failed: ") +
@@ -1647,8 +1801,8 @@ int main(int argc, char **argv)
             }
         if (WantsQuery(opts, "q5"))
             try {
-                (void)EncryptedQ5(data, tfhe_sk, tfhe_ek, repack_key,
-                                  repack_config, ckks);
+                (void)EncryptedQ5(data, tfhe_sk, tfhe_ek, micro_pack,
+                                  repack_key, repack_config, ckks);
             }
             catch (const std::exception &e) {
                 throw std::runtime_error(std::string("EncryptedQ5 failed: ") +

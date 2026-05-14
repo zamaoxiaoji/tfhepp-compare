@@ -14,6 +14,10 @@ list(REMOVE_ITEM test_sources "ckks_repack_interface_smoke.cpp")
 list(REMOVE_ITEM test_sources "ckks_relational_ops_test.cpp")
 list(REMOVE_ITEM test_sources "ckks_rns_masks_test.cpp")
 list(REMOVE_ITEM test_sources "tpch_ch5_pruned_pipeline.cpp")
+list(REMOVE_ITEM test_sources "tpch_q6_3pbs.cpp")
+list(REMOVE_ITEM test_sources "tpch_q14_3pbs.cpp")
+list(REMOVE_ITEM test_sources "tpch_q3_3pbs.cpp")
+list(REMOVE_ITEM test_sources "tpch_q5_3pbs.cpp")
 
 file(COPY test.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
 file(COPY show_info.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE)
@@ -142,6 +146,25 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tpch_ch5_pruned_pipeline.cpp"
         AES)
     target_compile_features(tpch_3pbs_q6_q14_q3_q5 PRIVATE cxx_std_20)
 endif()
+
+# HE3DB-style per-query smoke tests: each driver mirrors the layout of
+# HE3DB's relational_queries_test_16bits.cpp, but swaps the comparator for the
+# 3-PBS pruned variant and reuses this repository's repack/aggregation path.
+foreach(_q6_q14_q3_q5_query q6 q14 q3 q5)
+    set(_q_src "tpch_${_q6_q14_q3_q5_query}_3pbs.cpp")
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${_q_src}"
+       AND TARGET tfhepp_compare
+       AND TARGET tfhepp_ckks_repack)
+        set(_q_target "tpch_${_q6_q14_q3_q5_query}_3pbs")
+        add_executable(${_q_target} ${_q_src})
+        target_link_libraries(${_q_target}
+            tfhepp_compare
+            tfhepp_ckks_repack
+            tfhe++
+            AES)
+        target_compile_features(${_q_target} PRIVATE cxx_std_20)
+    endif()
+endforeach()
 
 
 # For GMP used in INTorus test

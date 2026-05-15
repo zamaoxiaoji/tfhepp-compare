@@ -156,6 +156,55 @@ std::vector<double> SlotsFromIntegral(const std::vector<T> &values,
     return s;
 }
 
+// Correct broadcast-based lookup join.
+// Assumes right table occupies slots [0..right_active-1] with right_keys[j]==j
+// (which is how the test driver lays out the right side).
+//
+// For each j in domain:
+//   1) keep value only at right slot j (× right_masks[j])
+//   2) rotate slot j to slot 0
+//   3) broadcast slot 0 to slots [0..left_active-1] via negative-step doubling
+//   4) gate with left_masks[j]
+//   5) accumulate
+//
+// Result: joined[i] = right_payload at slot k where right_keys[k]==left_keys[i],
+// for every i in [0..left_active-1].
+seal::Ciphertext BroadcastLookupJoin(
+    const std::vector<seal::Ciphertext> &left_masks,
+    const std::vector<seal::Ciphertext> &right_masks,
+    const seal::Ciphertext &right_payload, std::size_t right_active,
+    std::size_t left_active, const seal::RelinKeys &relin_keys,
+    const seal::GaloisKeys &galois_keys, seal::Evaluator &evaluator)
+{
+    seal::Ciphertext joined;
+    bool init = false;
+    for (std::size_t j = 0; j < right_active; ++j) {
+        auto val = MultiplyAndRescale(right_payload, right_masks[j], relin_keys,
+                                       evaluator);
+        if (j > 0)
+            evaluator.rotate_vector_inplace(val, static_cast<int>(j),
+                                             galois_keys);
+        for (std::size_t step = 1; step < left_active; step <<= 1) {
+            seal::Ciphertext rot;
+            evaluator.rotate_vector(val, -static_cast<int>(step), galois_keys,
+                                     rot);
+            evaluator.add_inplace(val, rot);
+        }
+        auto contrib = MultiplyAndRescale(left_masks[j], val, relin_keys,
+                                           evaluator);
+        if (!init) {
+            joined = std::move(contrib);
+            init = true;
+        }
+        else {
+            ModSwitchToCommonLevel(joined, contrib, evaluator);
+            contrib.scale() = joined.scale();
+            evaluator.add_inplace(joined, contrib);
+        }
+    }
+    return joined;
+}
+
 } // namespace
 
 double relational_query14(size_t num)
@@ -345,9 +394,9 @@ double relational_query14(size_t num)
         line_partkey_ct, partkey_domain, relin_keys, ckks_encoder, evaluator);
     auto part_partkey_masks = tfhepp_ckks::BuildLagrangeMasks(
         part_partkey_ct, partkey_domain, relin_keys, ckks_encoder, evaluator);
-    auto promo_on_line = tfhepp_ckks::LookupJoinFromEncryptedMasks(
+    auto promo_on_line = BroadcastLookupJoin(
         line_partkey_masks, part_partkey_masks, part_promo_ct,
-        kPartDomain, relin_keys, galois_keys, evaluator);
+        kPartDomain, num, relin_keys, galois_keys, evaluator);
 
     // -------- 4. Encrypt revenue at matching level for multiplication --------
     double qd_mask = LastCoeffModulus(mask_ckks, context);

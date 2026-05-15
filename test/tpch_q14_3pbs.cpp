@@ -397,6 +397,34 @@ double relational_query14(size_t num)
     auto promo_on_line = BroadcastLookupJoin(
         line_partkey_masks, part_partkey_masks, part_promo_ct,
         kPartDomain, num, relin_keys, galois_keys, evaluator);
+    // -------- DEBUG: dump promo_on_line at a few representative slots --------
+    {
+        seal::Plaintext pt;
+        std::vector<double> dec;
+        decryptor.decrypt(promo_on_line, pt);
+        ckks_encoder.decode(pt, dec);
+        printf("\n[DEBUG] line_partkey first 8 = ");
+        for (int i = 0; i < 8 && (size_t)i < num; i++)
+            printf("%llu ", (unsigned long long)line_partkey[i]);
+        printf("\n[DEBUG] part_promo[0..3] = %u %u %u %u\n",
+               part_promo[0], part_promo[1], part_promo[2], part_promo[3]);
+        printf("[DEBUG] promo_on_line[0..7]      = ");
+        for (int i = 0; i < 8; i++) printf("%.4f ", dec[i]);
+        printf("\n[DEBUG] promo_on_line[1020..1027] = ");
+        for (int i = 1020; i < 1028; i++) printf("%.4f ", dec[i]);
+        printf("\n[DEBUG] promo_on_line[2000..2007] = ");
+        for (int i = 2000; i < 2008; i++) printf("%.4f ", dec[i]);
+        // sum |dec[i]| over all slots, see how much "leaks"
+        double inactive = 0.0;
+        for (size_t i = num; i < ckks_encoder.slot_count(); i++)
+            inactive += std::abs(dec[i]);
+        printf("\n[DEBUG] sum |promo_on_line[i]| over i in [%zu..%zu) = %g\n",
+               num, ckks_encoder.slot_count(), inactive);
+    }
+
+    // Mask promo_on_line to active region as well, in case broadcast leaked.
+    ApplyActiveSlotMaskInPlace(promo_on_line, num, ckks_encoder, context,
+                                evaluator);
 
     // -------- 4. Encrypt revenue at matching level for multiplication --------
     double qd_mask = LastCoeffModulus(mask_ckks, context);

@@ -105,6 +105,7 @@ double relational_query6(size_t num)
     std::vector<TLWELvl2> shipdate_ciphers(num), discount_ciphers(num),
         quantity_ciphers(num);
     uint32_t num_bits = 16;
+    uint32_t compprecision = 32;
     uint32_t scale_bits = std::numeric_limits<Lvl2::T>::digits - num_bits - 1;
 
     TLWELvl2 predicate1_cipher, predicate2_cipher, predicate3_cipher,
@@ -163,18 +164,19 @@ double relational_query6(size_t num)
     for (size_t i = 0; i < num; i++) {
         TLWELvl1 pre_res;
         greater_than<Lvl2>(shipdate_ciphers[i], predicate1_cipher,
-                           filter_res[i], num_bits, ek, micro_pack, LOGIC);
+                           filter_res[i], compprecision, ek, micro_pack,
+                           LOGIC);
         less_than<Lvl2>(shipdate_ciphers[i], predicate2_cipher, pre_res,
-                        num_bits, ek, micro_pack, LOGIC);
+                        compprecision, ek, micro_pack, LOGIC);
         TFHEpp::HomAND(filter_res[i], pre_res, filter_res[i], ek);
         greater_than<Lvl2>(discount_ciphers[i], predicate3_cipher, pre_res,
-                           num_bits, ek, micro_pack, LOGIC);
+                           compprecision, ek, micro_pack, LOGIC);
         TFHEpp::HomAND(filter_res[i], pre_res, filter_res[i], ek);
         less_than<Lvl2>(discount_ciphers[i], predicate4_cipher, pre_res,
-                        num_bits, ek, micro_pack, LOGIC);
+                        compprecision, ek, micro_pack, LOGIC);
         TFHEpp::HomAND(filter_res[i], pre_res, filter_res[i], ek);
         less_than<Lvl2>(quantity_ciphers[i], predicate5_cipher, pre_res,
-                        num_bits, ek, micro_pack, LOGIC);
+                        compprecision, ek, micro_pack, LOGIC);
         lift_and_and(filter_res[i], pre_res, filter_res[i], 29, ek);
     }
     end = std::chrono::system_clock::now();
@@ -313,6 +315,8 @@ double relational_query6(size_t num)
     decryptor.decrypt(aggregated, plain);
     ckks_encoder.decode(plain, agg_result);
 
+    std::cout << "Filtering Time: " << filtering_time << " ms" << std::endl;
+    std::cout << "Aggregation Time: " << aggregation_time << " ms" << std::endl;
     std::cout << "Query Evaluation Time: " << filtering_time + aggregation_time
               << " ms" << std::endl;
 

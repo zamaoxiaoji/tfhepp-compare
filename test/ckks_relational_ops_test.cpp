@@ -12,8 +12,10 @@ namespace
     std::vector<int> RotationSteps(std::size_t slot_count)
     {
         std::vector<int> steps;
-        for (std::size_t step = 1; step < slot_count; step <<= 1)
+        for (std::size_t step = 1; step < slot_count; step <<= 1) {
             steps.push_back(static_cast<int>(step));
+            steps.push_back(-static_cast<int>(step));
+        }
         return steps;
     }
 
@@ -70,6 +72,46 @@ namespace
                 const double expected = (point == target) ? 1.0 : 0.0;
                 ExpectNear(EvalPowerPolynomial(alpha[target], domain[point]),
                            expected, 1e-10, "single-attribute lagrange");
+            }
+        }
+    }
+
+    void VerifyEncryptedLagrangeMasksWithUnevenChain()
+    {
+        constexpr double scale = static_cast<double>(uint64_t{1} << 40);
+        constexpr double tolerance = 0.08;
+
+        auto parms = tfhepp_ckks::MakeDefaultCKKSParameters(
+            16384, {59, 42, 42, 42, 42, 59});
+        seal::SEALContext context(parms, true, seal::sec_level_type::none);
+        seal::KeyGenerator keygen(context);
+        const auto secret_key = keygen.secret_key();
+        seal::PublicKey public_key;
+        keygen.create_public_key(public_key);
+        seal::RelinKeys relin_keys;
+        keygen.create_relin_keys(relin_keys);
+
+        seal::CKKSEncoder encoder(context);
+        seal::Encryptor encryptor(context, public_key);
+        seal::Decryptor decryptor(context, secret_key);
+        seal::Evaluator evaluator(context);
+
+        const std::vector<std::size_t> keys{0, 1, 2, 3, 1, 0};
+        const std::vector<double> domain{0.0, 1.0, 2.0, 3.0};
+        std::vector<double> key_slots(encoder.slot_count(), 0.0);
+        for (std::size_t row = 0; row < keys.size(); ++row)
+            key_slots[row] = static_cast<double>(keys[row]);
+        auto key_ct = EncryptSlots(key_slots, scale, encoder, encryptor);
+        auto masks = tfhepp_ckks::BuildLagrangeMasks(
+            key_ct, domain, relin_keys, encoder, evaluator);
+
+        for (std::size_t target = 0; target < domain.size(); ++target) {
+            const auto decoded =
+                DecryptSlots(masks[target], decryptor, encoder);
+            for (std::size_t row = 0; row < keys.size(); ++row) {
+                const double expected = keys[row] == target ? 1.0 : 0.0;
+                ExpectNear(decoded[row], expected, tolerance,
+                           "encrypted uneven-chain lagrange mask");
             }
         }
     }
@@ -253,6 +295,7 @@ int main()
 {
     VerifySingleAttributeLagrange();
     VerifyTensorBasisCompiler();
+    VerifyEncryptedLagrangeMasksWithUnevenChain();
 
     constexpr double scale = static_cast<double>(uint64_t{1} << 40);
     constexpr double tolerance = 0.05;
@@ -261,7 +304,7 @@ int main()
     constexpr std::size_t join_domain_size = 3;
 
     auto parms = tfhepp_ckks::MakeDefaultCKKSParameters(
-        16384, {60, 40, 40, 40, 40, 40, 40, 60});
+        16384, {60, 45, 45, 45, 45, 45, 45, 60});
     seal::SEALContext context(parms);
     seal::KeyGenerator keygen(context);
     const auto secret_key = keygen.secret_key();
@@ -334,6 +377,39 @@ int main()
     for (std::size_t row = 0; row < expected_join.size(); ++row)
         ExpectNear(decoded_join[row], expected_join[row], tolerance,
                    "join slot");
+
+    const std::vector<std::size_t> active_left_keys{0, 1, 0, 2, 3, 1, 2, 0};
+    const std::vector<std::size_t> active_right_keys{0, 1, 2, 3};
+    const std::vector<double> active_payload{11.0, 22.0, 33.0, 44.0};
+    const std::vector<double> active_domain{0.0, 1.0, 2.0, 3.0};
+    const auto expected_active_join =
+        PlainLookupJoin(active_left_keys, active_right_keys, active_payload,
+                        active_domain.size());
+    auto active_left_ct = EncryptSlots(
+        KeySlotVector(active_left_keys, slot_count), scale, encoder,
+        encryptor);
+    auto active_right_ct = EncryptSlots(
+        KeySlotVector(active_right_keys, slot_count), scale, encoder,
+        encryptor);
+    auto active_left_masks = tfhepp_ckks::BuildLagrangeMasks(
+        active_left_ct, active_domain, relin_keys, encoder, evaluator);
+    auto active_right_masks = tfhepp_ckks::BuildLagrangeMasks(
+        active_right_ct, active_domain, relin_keys, encoder, evaluator);
+    const auto active_right_mask0 =
+        DecryptSlots(active_right_masks[0], decryptor, encoder);
+    ExpectNear(active_right_mask0[0], 1.0, tolerance,
+               "active right mask0 slot0");
+    auto active_join = tfhepp_ckks::LookupJoinFromEncryptedMasks(
+        active_left_masks, active_right_masks,
+        EncryptSlots(SlotVector(active_payload, slot_count), scale, encoder,
+                     encryptor),
+        active_right_keys.size(), active_left_keys.size(), relin_keys,
+        galois_keys, encoder, context, evaluator);
+    const auto decoded_active_join =
+        DecryptSlots(active_join, decryptor, encoder);
+    for (std::size_t row = 0; row < expected_active_join.size(); ++row)
+        ExpectNear(decoded_active_join[row], expected_active_join[row],
+                   tolerance, "active join slot");
 
     const std::vector<std::size_t> gender{0, 0, 1, 1, 0, 1, 0};
     const std::vector<std::size_t> dept{0, 1, 0, 2, 2, 1, 1};

@@ -2,6 +2,7 @@
 #include "ckks_relational.h"
 #include "ckks_repack.h"
 #include "gate.hpp"
+#include <algorithm>
 #include <iomanip>
 #include <random>
 #include <chrono>
@@ -24,13 +25,13 @@ using namespace seal;
  *    and l_shipdate >= date ':1'
  *    and l_shipdate <  date ':1' + interval '1' month;
  *
- *  Compliance contract (per Chapter 4):
+ *  Strict Chapter 4 contract:
  *    - WHERE predicate (l_shipdate range) is the only TFHE 3-PBS comparison.
- *    - l_partkey, p_partkey are sent as CKKS ciphertexts.
- *    - p_promo (the 0/1 flag for p_type LIKE 'PROMO%') is a CKKS payload.
- *    - The lineitem-part JOIN is done in CKKS via Lagrange indicator masks
- *      and LookupJoinFromEncryptedMasks (Algorithm 4.3).
- *    - The server never sees plaintext keys or plaintext join selectors.
+ *    - The client encrypts raw lineitem/part keys and the part promo payload.
+ *    - The server derives CKKS Lagrange masks, performs the encrypted lookup
+ *      join, then aggregates the filtered revenue.
+ *    - Plain data below is used only by the standalone driver to build the
+ *      reference answer and to simulate client-side encryption.
  */
 
 void lift_and_and(TLWELvl1 &cipher1, TLWELvl1 &cipher2, TLWELvl1 &res,
@@ -74,6 +75,9 @@ void less_than(const TFHEpp::TLWE<P> &cipher1,
 // -------------------- CKKS level/scale helpers --------------------
 namespace {
 
+double LastCoeffModulus(const seal::Ciphertext &cipher,
+                        const seal::SEALContext &context);
+
 void ApplyActiveSlotMaskInPlace(seal::Ciphertext &cipher,
                                 std::size_t active_slots,
                                 seal::CKKSEncoder &encoder,
@@ -83,15 +87,12 @@ void ApplyActiveSlotMaskInPlace(seal::Ciphertext &cipher,
     std::vector<double> slots(encoder.slot_count(), 0.0);
     std::fill(slots.begin(), slots.begin() + active_slots, 1.0);
     seal::Plaintext plain;
-    const auto context_data = context.get_context_data(cipher.parms_id());
-    const auto &moduli = context_data->parms().coeff_modulus();
-    const double qd =
-        static_cast<double>(moduli[cipher.coeff_modulus_size() - 1].value());
-    const double target_scale = cipher.scale();
-    encoder.encode(slots, cipher.parms_id(), qd, plain);
+    encoder.encode(slots, cipher.parms_id(),
+                   std::min(std::ldexp(1.0, 45),
+                            LastCoeffModulus(cipher, context) / 2.0),
+                   plain);
     evaluator.multiply_plain_inplace(cipher, plain);
     evaluator.rescale_to_next_inplace(cipher);
-    cipher.scale() = target_scale;
 }
 
 void ModSwitchToCommonLevel(seal::Ciphertext &lhs, seal::Ciphertext &rhs,
@@ -156,71 +157,19 @@ std::vector<double> SlotsFromIntegral(const std::vector<T> &values,
     return s;
 }
 
-// Correct broadcast-based lookup join.
-// Assumes right table occupies slots [0..right_active-1] with right_keys[j]==j
-// (which is how the test driver lays out the right side).
-//
-// For each j in domain:
-//   1) keep value only at right slot j (× right_masks[j])
-//   2) rotate slot j to slot 0
-//   3) broadcast slot 0 to slots [0..left_active-1] via negative-step doubling
-//   4) gate with left_masks[j]
-//   5) accumulate
-//
-// Result: joined[i] = right_payload at slot k where right_keys[k]==left_keys[i],
-// for every i in [0..left_active-1].
-seal::Ciphertext BroadcastLookupJoin(
-    const std::vector<seal::Ciphertext> &left_masks,
-    const std::vector<seal::Ciphertext> &right_masks,
-    const seal::Ciphertext &right_payload, std::size_t right_active,
-    std::size_t left_active, const seal::RelinKeys &relin_keys,
-    const seal::GaloisKeys &galois_keys, seal::Evaluator &evaluator)
-{
-    seal::Ciphertext joined;
-    bool init = false;
-    for (std::size_t j = 0; j < right_active; ++j) {
-        auto val = MultiplyAndRescale(right_payload, right_masks[j], relin_keys,
-                                       evaluator);
-        if (j > 0)
-            evaluator.rotate_vector_inplace(val, static_cast<int>(j),
-                                             galois_keys);
-        for (std::size_t step = 1; step < left_active; step <<= 1) {
-            seal::Ciphertext rot;
-            evaluator.rotate_vector(val, -static_cast<int>(step), galois_keys,
-                                     rot);
-            evaluator.add_inplace(val, rot);
-        }
-        auto contrib = MultiplyAndRescale(left_masks[j], val, relin_keys,
-                                           evaluator);
-        if (!init) {
-            joined = std::move(contrib);
-            init = true;
-        }
-        else {
-            ModSwitchToCommonLevel(joined, contrib, evaluator);
-            contrib.scale() = joined.scale();
-            evaluator.add_inplace(joined, contrib);
-        }
-    }
-    return joined;
-}
-
 } // namespace
 
 double relational_query14(size_t num)
 {
     std::cout << "Relational SQL Query14 Test (WHERE->TFHE 3-PBS pruned, "
-              << "JOIN->CKKS Lagrange):\n";
+              << "JOIN+aggregation->CKKS Lagrange):\n";
     std::cout << "--------------------------------------------------------\n";
     std::cout << "Records: " << num << std::endl;
 
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
-    using P = Lvl1;
     TFHESecretKey sk;
     TFHEEvalKey ek;
-    using bkP = Lvl01;
-    using iksP = Lvl10;
 
     // -------- data domains --------
     // Lineitem: shipdate (WHERE), partkey (JOIN key)
@@ -251,6 +200,13 @@ double relational_query14(size_t num)
         part_keys[j] = static_cast<uint32_t>(j);
         part_promo[j] = promo_message(engine);
     }
+    uint64_t pred_lo = 10592, pred_hi = 10957;
+    if (num > 0) {
+        ship_date[0] = pred_lo;
+        line_partkey[0] = 0;
+        revenue[0] = std::max<double>(revenue[0], 1.0);
+        part_promo[0] = 1;
+    }
 
     // -------- TFHE encryption of WHERE-relevant column only --------
     uint32_t num_bits = 16;
@@ -261,9 +217,8 @@ double relational_query14(size_t num)
         shipdate_ciphers[i] = tlweSymInt32Encrypt<Lvl2>(
             ship_date[i], Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
     }
-    uint64_t pred_lo = 10592, pred_hi = 10957;
     TLWELvl2 pred_lo_ct = tlweSymInt32Encrypt<Lvl2>(
-        pred_lo, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
+        pred_lo - 1, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
     TLWELvl2 pred_hi_ct = tlweSymInt32Encrypt<Lvl2>(
         pred_hi, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
 
@@ -289,7 +244,7 @@ double relational_query14(size_t num)
     double plain_total = 0.0, plain_promo = 0.0;
     for (size_t i = 0; i < num; i++) {
         const bool date_ok =
-            ship_date[i] > pred_lo && ship_date[i] < pred_hi;
+            ship_date[i] >= pred_lo && ship_date[i] < pred_hi;
         plain_filter[i] = date_ok ? 1 : 0;
         if (date_ok) {
             plain_total += revenue[i];
@@ -302,15 +257,13 @@ double relational_query14(size_t num)
     // -------- CKKS setup --------
     std::cout << "Aggregation :" << std::endl;
     uint32_t mask_scale_bits = 29;
-    uint64_t modq_bits = 32;
     uint64_t modulus_bits = 45;
     std::cout << "Generating Parameters..." << std::endl;
     seal::EncryptionParameters parms(seal::scheme_type::ckks);
     size_t poly_modulus_degree = 65536;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    // Coeff chain: repack consumes ~7 levels, then we do
-    // mul(filter,revenue), mul(.,promo_on_line) where promo_on_line itself
-    // uses ~3 levels (Lagrange basis + LookupJoin). 21 primes is enough.
+    // Coeff chain is intentionally generous: repack consumes several levels
+    // and the encrypted Lagrange lookup consumes more before aggregation.
     parms.set_coeff_modulus(seal::CoeffModulus::Create(
         poly_modulus_degree,
         {59, 42, 42, 42, 42, 42, 42, 42, 42, 45, 45, 45, 45, 45, 45, 45, 45,
@@ -373,56 +326,28 @@ double relational_query14(size_t num)
     std::vector<double> part_promo_slots =
         SlotsFromIntegral(part_promo, ckks_encoder.slot_count());
 
-    seal::Plaintext plain_tmp;
-    double scale = std::pow(2.0, 40);
-    ckks_encoder.encode(line_partkey_slots, scale, plain_tmp);
-    seal::Ciphertext line_partkey_ct;
-    encryptor.encrypt(plain_tmp, line_partkey_ct);
-    ckks_encoder.encode(part_partkey_slots, scale, plain_tmp);
-    seal::Ciphertext part_partkey_ct;
-    encryptor.encrypt(plain_tmp, part_partkey_ct);
-    ckks_encoder.encode(part_promo_slots, scale, plain_tmp);
-    seal::Ciphertext part_promo_ct;
-    encryptor.encrypt(plain_tmp, part_promo_ct);
+    const double scale = std::pow(2.0, 40);
+    auto line_partkey_ct =
+        EncryptAtLevel(line_partkey_slots, context.first_parms_id(), scale,
+                       ckks_encoder, encryptor);
+    auto part_partkey_ct =
+        EncryptAtLevel(part_partkey_slots, context.first_parms_id(), scale,
+                       ckks_encoder, encryptor);
+    auto part_promo_ct =
+        EncryptAtLevel(part_promo_slots, context.first_parms_id(), scale,
+                       ckks_encoder, encryptor);
 
-    // -------- 3. CKKS Lagrange JOIN: broadcast part_promo to each lineitem --------
+    // -------- 3. CKKS payload JOIN: broadcast part_promo to each lineitem --------
     std::vector<double> partkey_domain(kPartDomain);
-    for (size_t j = 0; j < kPartDomain; j++)
+    for (size_t j = 0; j < kPartDomain; ++j)
         partkey_domain[j] = static_cast<double>(j);
-
     auto line_partkey_masks = tfhepp_ckks::BuildLagrangeMasks(
         line_partkey_ct, partkey_domain, relin_keys, ckks_encoder, evaluator);
     auto part_partkey_masks = tfhepp_ckks::BuildLagrangeMasks(
         part_partkey_ct, partkey_domain, relin_keys, ckks_encoder, evaluator);
-    auto promo_on_line = BroadcastLookupJoin(
-        line_partkey_masks, part_partkey_masks, part_promo_ct,
-        kPartDomain, num, relin_keys, galois_keys, evaluator);
-    // -------- DEBUG: dump promo_on_line at a few representative slots --------
-    {
-        seal::Plaintext pt;
-        std::vector<double> dec;
-        decryptor.decrypt(promo_on_line, pt);
-        ckks_encoder.decode(pt, dec);
-        printf("\n[DEBUG] line_partkey first 8 = ");
-        for (int i = 0; i < 8 && (size_t)i < num; i++)
-            printf("%llu ", (unsigned long long)line_partkey[i]);
-        printf("\n[DEBUG] part_promo[0..3] = %u %u %u %u\n",
-               part_promo[0], part_promo[1], part_promo[2], part_promo[3]);
-        printf("[DEBUG] promo_on_line[0..7]      = ");
-        for (int i = 0; i < 8; i++) printf("%.4f ", dec[i]);
-        printf("\n[DEBUG] promo_on_line[1020..1027] = ");
-        for (int i = 1020; i < 1028; i++) printf("%.4f ", dec[i]);
-        printf("\n[DEBUG] promo_on_line[2000..2007] = ");
-        for (int i = 2000; i < 2008; i++) printf("%.4f ", dec[i]);
-        // sum |dec[i]| over all slots, see how much "leaks"
-        double inactive = 0.0;
-        for (size_t i = num; i < ckks_encoder.slot_count(); i++)
-            inactive += std::abs(dec[i]);
-        printf("\n[DEBUG] sum |promo_on_line[i]| over i in [%zu..%zu) = %g\n",
-               num, ckks_encoder.slot_count(), inactive);
-    }
-
-    // Mask promo_on_line to active region as well, in case broadcast leaked.
+    auto promo_on_line = tfhepp_ckks::LookupJoinFromEncryptedMasks(
+        line_partkey_masks, part_partkey_masks, part_promo_ct, kPartDomain,
+        num, relin_keys, galois_keys, ckks_encoder, context, evaluator);
     ApplyActiveSlotMaskInPlace(promo_on_line, num, ckks_encoder, context,
                                 evaluator);
 
@@ -471,7 +396,7 @@ double relational_query14(size_t num)
     const double encrypted_total = total_decoded[0];
     const double encrypted_promo = promo_decoded[0];
     const double encrypted_ratio =
-        std::abs(encrypted_total) < 1e-9 ? 0.0
+        std::abs(encrypted_total) < 0.5 ? 0.0
                                           : 100.0 * encrypted_promo /
                                                 encrypted_total;
     const double plain_ratio =
@@ -502,8 +427,8 @@ int main(int argc, char **argv)
     if (argc > 1) num = static_cast<size_t>(std::stoull(argv[1]));
     std::cout << "----------------------------------------------------"
               << std::endl;
-    std::cout << "TPC-H Q14 (compliant): WHERE = TFHE 3-PBS, "
-              << "JOIN = CKKS Lagrange (Algorithm 4.3)" << std::endl;
+    std::cout << "TPC-H Q14 (strict Chapter 4): WHERE = TFHE 3-PBS, "
+              << "JOIN + aggregation = CKKS Lagrange" << std::endl;
     std::cout << std::endl;
     relational_query14(num);
     return 0;

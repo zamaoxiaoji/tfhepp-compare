@@ -1,0 +1,36 @@
+$ /home/wrn/tfhepp-compare/build/test/tpch_q14_3pbs 2048
+# started: 2026-05-15 22:32:01
+----------------------------------------------------
+TPC-H Q14 (compliant): WHERE = TFHE 3-PBS, JOIN = CKKS Lagrange (Algorithm 4.3)
+
+Relational SQL Query14 Test (WHERE->TFHE 3-PBS pruned, JOIN->CKKS Lagrange):
+--------------------------------------------------------
+Records: 2048
+Filtering finish
+Aggregation :
+Generating Parameters...
+Generating Conversion Key...
+Starting Conversion...
+Repack mask average error = 0.00978194 ~ 2^-6.7  (active slots = 2048)
+
+[DEBUG] line_partkey first 8 = 3 3 0 2 1 0 1 1 
+[DEBUG] part_promo[0..3] = 1 1 1 0
+[DEBUG] promo_on_line[0..7]      = 0.0000 0.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 
+[DEBUG] promo_on_line[1020..1027] = 0.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 
+[DEBUG] promo_on_line[2000..2007] = 1.0000 1.0000 1.0000 -0.0000 -0.0000 1.0000 -0.0000 1.0000 
+[DEBUG] sum |promo_on_line[i]| over i in [2048..32768) = 2.18112e-07
+Filtering Time: 1.1131e+06 ms
+CKKS (Repack + Join + Aggregation) Time: 146696 ms
+Query Evaluation Time: 1.2598e+06 ms
+Encrypted query result: 
+   promo_revenue
+         72.0454
+         (total=4355.32, promo=3137.81)
+Plain query result: 
+   promo_revenue
+         68.3871
+         (total=3410, promo=2332)
+
+# finished: 2026-05-15 22:55:28
+# returncode: 0
+# wall_ms: 1406536.851

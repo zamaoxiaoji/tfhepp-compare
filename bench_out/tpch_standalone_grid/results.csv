@@ -1,0 +1,26 @@
+system,query,rows,returncode,wall_ms,reported_total_ms,filtering_ms,ckks_or_aggregation_ms,repack_avg_error,accuracy_percent,max_abs_error,tolerance,result_count,correct_count,log,note
+he3db_original,q6,1024,0,3.73386e+07,2.20433e+06,,,0,100,0,0.5,1,1,bench_out/tpch_standalone_grid/logs/he3db_original_q6_1024_8192_original_main.log,wall_ms is for the whole HE3DB original binary run
+he3db_original,q6,2048,0,3.73386e+07,4.6462e+06,,,0,100,0,0.5,1,1,bench_out/tpch_standalone_grid/logs/he3db_original_q6_1024_8192_original_main.log,wall_ms is for the whole HE3DB original binary run
+he3db_original,q6,4096,0,3.73386e+07,8.776e+06,,,0,100,0,0.5,1,1,bench_out/tpch_standalone_grid/logs/he3db_original_q6_1024_8192_original_main.log,wall_ms is for the whole HE3DB original binary run
+he3db_original,q6,8192,0,3.73386e+07,2.10871e+07,,,0,100,0,0.5,1,1,bench_out/tpch_standalone_grid/logs/he3db_original_q6_1024_8192_original_main.log,wall_ms is for the whole HE3DB original binary run
+he3db_original,q6,16384,0,,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/he3db_original_q6_1024_8192_original_main.log,not emitted by unmodified HE3DB original main (loop condition is i < 16384)
+standalone_3pbs_ckks,q14,1024,0,639029,553831,416577,137254,,100,9.1325e-05,0.01,1,1,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q14_1024.log,
+standalone_3pbs_ckks,q14,2048,0,1.40654e+06,1.2598e+06,1.1131e+06,146696,,0,3.6583,0.01,1,0,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q14_2048.log,
+standalone_3pbs_ckks,q14,4096,0,1.77972e+06,1.69728e+06,1.57826e+06,119020,,0,1.2277,0.01,1,0,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q14_4096.log,
+standalone_3pbs_ckks,q14,8192,0,3.27588e+06,3.19396e+06,3.0755e+06,118452,,0,0.8534,0.01,1,0,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q14_8192.log,
+standalone_3pbs_ckks,q14,16384,0,6.40624e+06,6.32346e+06,6.20398e+06,119478,,100,0.001,0.01,1,1,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q14_16384.log,
+standalone_3pbs_ckks,q3,1024,-6,566211,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q3_1024.log,
+standalone_3pbs_ckks,q3,2048,-6,680272,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q3_2048.log,
+standalone_3pbs_ckks,q3,4096,-6,997468,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q3_4096.log,
+standalone_3pbs_ckks,q3,8192,-6,1.78858e+06,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q3_8192.log,
+standalone_3pbs_ckks,q3,16384,-6,3.44591e+06,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q3_16384.log,
+standalone_3pbs_ckks,q5,1024,-6,451720,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q5_1024.log,
+standalone_3pbs_ckks,q5,2048,-6,201710,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q5_2048.log,
+standalone_3pbs_ckks,q5,4096,-6,189912,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q5_4096.log,
+standalone_3pbs_ckks,q5,8192,-6,189685,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q5_8192.log,
+standalone_3pbs_ckks,q5,16384,-6,190008,,,,,,,0.5,0,,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q5_16384.log,
+standalone_3pbs_ckks,q6,1024,0,2.13118e+06,2.03836e+06,1.9385e+06,99863,0.001953,0,165,0.5,1,0,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q6_1024.log,
+standalone_3pbs_ckks,q6,2048,0,2.63575e+06,2.57244e+06,2.51336e+06,59084,0,100,0,0.5,1,1,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q6_2048.log,
+standalone_3pbs_ckks,q6,4096,0,4.05043e+06,3.98877e+06,3.93042e+06,58356,0.000488,0,73,0.5,1,0,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q6_4096.log,
+standalone_3pbs_ckks,q6,8192,0,8.18615e+06,8.12357e+06,8.06453e+06,59040,0.00061,0,238,0.5,1,0,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q6_8192.log,
+standalone_3pbs_ckks,q6,16384,0,2.06907e+07,2.0627e+07,2.05679e+07,59090,0.000732,0,563,0.5,1,0,bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q6_16384.log,

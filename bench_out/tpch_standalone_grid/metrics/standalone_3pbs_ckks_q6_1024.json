@@ -1,0 +1,25 @@
+{
+  "accuracy_percent": 0.0,
+  "ckks_or_aggregation_ms": 99863.0,
+  "correct_count": 0,
+  "encrypted_values": [
+    166.0
+  ],
+  "filtering_ms": 1938500.0,
+  "log": "bench_out/tpch_standalone_grid/logs/standalone_3pbs_ckks_q6_1024.log",
+  "max_abs_error": 165.0,
+  "note": "",
+  "plain_values": [
+    1.0
+  ],
+  "query": "q6",
+  "repack_avg_error": 0.001953,
+  "reported_total_ms": 2038360.0,
+  "result_count": 1,
+  "returncode": 0,
+  "rows": 1024,
+  "system": "standalone_3pbs_ckks",
+  "timestamp": "2026-05-15 22:32:01",
+  "tolerance": 0.5,
+  "wall_ms": 2131178.6364598665
+}

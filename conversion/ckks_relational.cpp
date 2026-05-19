@@ -65,6 +65,74 @@ namespace tfhepp_ckks
             return result;
         }
 
+        seal::Ciphertext MultiplyPlainScalarNoRescale(
+            const seal::Ciphertext &cipher, double scalar,
+            seal::CKKSEncoder &encoder, seal::Evaluator &evaluator)
+        {
+            constexpr double min_plain_scale = 16.0;
+            constexpr double target_cipher_scale =
+                17592186044416.0; // 2^44
+            const double plain_scale =
+                std::max(min_plain_scale, target_cipher_scale / cipher.scale());
+            seal::Plaintext plain;
+            encoder.encode(scalar, cipher.parms_id(), plain_scale, plain);
+
+            seal::Ciphertext result = cipher;
+            evaluator.multiply_plain_inplace(result, plain);
+            return result;
+        }
+
+        seal::Ciphertext SubPlainScalar(
+            const seal::Ciphertext &cipher, double scalar,
+            seal::CKKSEncoder &encoder, seal::Evaluator &evaluator)
+        {
+            seal::Ciphertext result = cipher;
+            if (scalar == 0.0) return result;
+
+            seal::Plaintext plain;
+            encoder.encode(scalar, result.parms_id(), result.scale(), plain);
+            evaluator.sub_plain_inplace(result, plain);
+            return result;
+        }
+
+        double LastCoeffModulus(const seal::Ciphertext &cipher,
+                                const seal::SEALContext &context)
+        {
+            const auto context_data = context.get_context_data(cipher.parms_id());
+            const auto &moduli = context_data->parms().coeff_modulus();
+            return static_cast<double>(
+                moduli[cipher.coeff_modulus_size() - 1].value());
+        }
+
+        void KeepFirstSlotInPlace(seal::Ciphertext &cipher,
+                                  seal::CKKSEncoder &encoder,
+                                  const seal::SEALContext &context,
+                                  seal::Evaluator &evaluator)
+        {
+            std::vector<double> slots(encoder.slot_count(), 0.0);
+            slots[0] = 1.0;
+            seal::Plaintext plain;
+            encoder.encode(slots, cipher.parms_id(),
+                           std::min(std::ldexp(1.0, 45),
+                                    LastCoeffModulus(cipher, context) / 2.0),
+                           plain);
+            evaluator.multiply_plain_inplace(cipher, plain);
+            evaluator.rescale_to_next_inplace(cipher);
+        }
+
+        void BroadcastFirstSlotInPlace(seal::Ciphertext &cipher,
+                                       std::size_t active_slots,
+                                       const seal::GaloisKeys &galois_keys,
+                                       seal::Evaluator &evaluator)
+        {
+            for (std::size_t step = 1; step < active_slots; step <<= 1) {
+                seal::Ciphertext rotated;
+                evaluator.rotate_vector(cipher, -static_cast<int>(step),
+                                        galois_keys, rotated);
+                evaluator.add_inplace(cipher, rotated);
+            }
+        }
+
         void AddAlignedInPlace(seal::Ciphertext &acc,
                                const seal::Ciphertext &term_in,
                                seal::Evaluator &evaluator)
@@ -490,12 +558,46 @@ namespace tfhepp_ckks
         const seal::RelinKeys &relin_keys, seal::CKKSEncoder &encoder,
         seal::Evaluator &evaluator)
     {
-        const auto alpha_table = SolveLagrangeAlphaTable(domain);
-        auto basis =
-            BuildMonomialBasis(column, domain.size() - 1, relin_keys,
-                               evaluator);
-        return ReconstructMasksFromMonomialBasis(basis, alpha_table, encoder,
-                                                 evaluator);
+        if (domain.empty())
+            throw std::invalid_argument("BuildLagrangeMasks: empty domain");
+
+        std::vector<seal::Ciphertext> masks;
+        masks.reserve(domain.size());
+
+        if (domain.size() == 1) {
+            seal::Ciphertext one = column;
+            evaluator.sub_inplace(one, column);
+            AddPlainScalarInPlace(one, 1.0, encoder, evaluator);
+            masks.push_back(std::move(one));
+            return masks;
+        }
+
+        for (std::size_t target = 0; target < domain.size(); ++target) {
+            seal::Ciphertext mask;
+            bool initialized = false;
+            double denominator = 1.0;
+
+            for (std::size_t k = 0; k < domain.size(); ++k) {
+                if (k == target) continue;
+                denominator *= domain[target] - domain[k];
+
+                seal::Ciphertext term =
+                    SubPlainScalar(column, domain[k], encoder, evaluator);
+                if (!initialized) {
+                    mask = std::move(term);
+                    initialized = true;
+                }
+                else {
+                    mask = MultiplyAndRescale(mask, term, relin_keys,
+                                              evaluator);
+                }
+            }
+
+            mask = MultiplyPlainScalarNoRescale(mask, 1.0 / denominator,
+                                                encoder, evaluator);
+            masks.push_back(std::move(mask));
+        }
+        return masks;
     }
 
     std::vector<seal::Ciphertext> BuildTensorLagrangeMasks(
@@ -504,11 +606,32 @@ namespace tfhepp_ckks
         const seal::RelinKeys &relin_keys, seal::CKKSEncoder &encoder,
         seal::Evaluator &evaluator)
     {
-        const auto alpha_table = SolveTensorLagrangeAlphaTable(domains);
-        auto basis =
-            BuildTensorMonomialBasis(columns, domains, relin_keys, evaluator);
-        return ReconstructMasksFromMonomialBasis(basis, alpha_table, encoder,
-                                                 evaluator);
+        const auto sizes = DomainSizes(domains, "BuildTensorLagrangeMasks");
+        if (columns.size() != domains.size())
+            throw std::invalid_argument(
+                "BuildTensorLagrangeMasks: column/domain count mismatch");
+
+        std::vector<std::vector<seal::Ciphertext>> attribute_masks;
+        attribute_masks.reserve(columns.size());
+        for (std::size_t attr = 0; attr < columns.size(); ++attr) {
+            attribute_masks.push_back(BuildLagrangeMasks(
+                columns[attr], domains[attr], relin_keys, encoder, evaluator));
+        }
+
+        std::vector<seal::Ciphertext> masks;
+        const std::size_t total_size = ProductSize(sizes);
+        masks.reserve(total_size);
+        for (std::size_t target = 0; target < total_size; ++target) {
+            const auto digits = DecodeMixedRadix(target, sizes);
+            seal::Ciphertext mask = attribute_masks[0][digits[0]];
+            for (std::size_t attr = 1; attr < columns.size(); ++attr) {
+                mask = MultiplyAndRescale(mask,
+                                          attribute_masks[attr][digits[attr]],
+                                          relin_keys, evaluator);
+            }
+            masks.push_back(std::move(mask));
+        }
+        return masks;
     }
 
     std::vector<seal::Ciphertext> GroupByCountFromEncryptedMasks(
@@ -575,6 +698,52 @@ namespace tfhepp_ckks
                 MultiplyAndRescale(right_payload, right_key_masks[j],
                                    relin_keys, evaluator);
             RotateAndSumInPlace(payload, slot_count, galois_keys, evaluator);
+
+            seal::Ciphertext contribution =
+                MultiplyAndRescale(left_key_masks[j], payload, relin_keys,
+                                   evaluator);
+            if (!initialized) {
+                joined = std::move(contribution);
+                initialized = true;
+            }
+            else {
+                AddAlignedInPlace(joined, contribution, evaluator);
+            }
+        }
+        return joined;
+    }
+
+    seal::Ciphertext LookupJoinFromEncryptedMasks(
+        const std::vector<seal::Ciphertext> &left_key_masks,
+        const std::vector<seal::Ciphertext> &right_key_masks,
+        const seal::Ciphertext &right_payload,
+        std::size_t right_active_slots, std::size_t left_active_slots,
+        const seal::RelinKeys &relin_keys,
+        const seal::GaloisKeys &galois_keys, seal::CKKSEncoder &encoder,
+        const seal::SEALContext &context, seal::Evaluator &evaluator)
+    {
+        if (left_key_masks.empty())
+            throw std::invalid_argument(
+                "LookupJoinFromEncryptedMasks: empty key domain");
+        if (left_key_masks.size() != right_key_masks.size())
+            throw std::invalid_argument(
+                "LookupJoinFromEncryptedMasks: mask domain size mismatch");
+        RequireActiveSlots(right_active_slots,
+                           "LookupJoinFromEncryptedMasks right side");
+        RequireActiveSlots(left_active_slots,
+                           "LookupJoinFromEncryptedMasks left side");
+
+        seal::Ciphertext joined;
+        bool initialized = false;
+        for (std::size_t j = 0; j < left_key_masks.size(); ++j) {
+            seal::Ciphertext payload =
+                MultiplyAndRescale(right_payload, right_key_masks[j],
+                                   relin_keys, evaluator);
+            RotateAndSumInPlace(payload, right_active_slots, galois_keys,
+                                evaluator);
+            KeepFirstSlotInPlace(payload, encoder, context, evaluator);
+            BroadcastFirstSlotInPlace(payload, left_active_slots, galois_keys,
+                                      evaluator);
 
             seal::Ciphertext contribution =
                 MultiplyAndRescale(left_key_masks[j], payload, relin_keys,

@@ -2,6 +2,7 @@
 #include "ckks_relational.h"
 #include "ckks_repack.h"
 #include "gate.hpp"
+#include <algorithm>
 #include <iomanip>
 #include <random>
 #include <chrono>
@@ -27,20 +28,13 @@ using namespace seal;
  *    and l_shipdate  > date ':2'
  *  group by l_orderkey, o_orderdate, o_shippriority;
  *
- *  Compliance contract (per Chapter 4):
+ *  Strict Chapter 4 contract:
  *    - The three WHERE predicates (c_mktsegment == 'BUILDING',
  *      o_orderdate < D, l_shipdate > D) are the only TFHE 3-PBS comparisons.
- *    - All foreign keys (l_orderkey, o_orderkey, o_custkey, c_custkey) and
- *      every group-by payload (o_shippriority) are sent as CKKS ciphertexts.
- *    - customer ⋈ orders is done with CKKS Lagrange masks built from the
- *      encrypted custkey columns and LookupJoinFromEncryptedMasks
- *      (Algorithm 4.3).
- *    - orders ⋈ lineitem is done the same way on orderkey.
- *    - GROUP BY orderkey is realised with CKKS Lagrange indicator masks on
- *      the same encrypted lineitem.orderkey column.
- *    - The server sees no plaintext join key, no plaintext selector, no
- *      plaintext group id; it only sees public domain sizes and the test
- *      driver's plaintext tables (which simulate the client).
+ *    - The client encrypts raw key/payload columns; the server derives
+ *      Lagrange masks, lookup joins, and group-by masks over CKKS.
+ *    - Plain data below is used only by the standalone driver to build the
+ *      reference answer and to simulate client-side encryption.
  */
 
 void lift_and_and(TLWELvl1 &cipher1, TLWELvl1 &cipher2, TLWELvl1 &res,
@@ -124,6 +118,9 @@ void equal(const TFHEpp::TLWE<P> &cipher1, const TFHEpp::TLWE<P> &cipher2,
 // -------------------- CKKS level/scale helpers --------------------
 namespace {
 
+double LastCoeffModulus(const seal::Ciphertext &cipher,
+                        const seal::SEALContext &context);
+
 void ApplyActiveSlotMaskInPlace(seal::Ciphertext &cipher,
                                 std::size_t active_slots,
                                 seal::CKKSEncoder &encoder,
@@ -133,15 +130,12 @@ void ApplyActiveSlotMaskInPlace(seal::Ciphertext &cipher,
     std::vector<double> slots(encoder.slot_count(), 0.0);
     std::fill(slots.begin(), slots.begin() + active_slots, 1.0);
     seal::Plaintext plain;
-    const auto context_data = context.get_context_data(cipher.parms_id());
-    const auto &moduli = context_data->parms().coeff_modulus();
-    const double qd =
-        static_cast<double>(moduli[cipher.coeff_modulus_size() - 1].value());
-    const double target_scale = cipher.scale();
-    encoder.encode(slots, cipher.parms_id(), qd, plain);
+    encoder.encode(slots, cipher.parms_id(),
+                   std::min(std::ldexp(1.0, 45),
+                            LastCoeffModulus(cipher, context) / 2.0),
+                   plain);
     evaluator.multiply_plain_inplace(cipher, plain);
     evaluator.rescale_to_next_inplace(cipher);
-    cipher.scale() = target_scale;
 }
 
 void ModSwitchToCommonLevel(seal::Ciphertext &lhs, seal::Ciphertext &rhs,
@@ -188,6 +182,14 @@ seal::Ciphertext EncryptAtLevel(const std::vector<double> &slots,
     return cipher;
 }
 
+std::vector<double> SlotsFromDouble(const std::vector<double> &values,
+                                    std::size_t slot_count)
+{
+    std::vector<double> s(slot_count, 0.0);
+    for (std::size_t i = 0; i < values.size(); ++i) s[i] = values[i];
+    return s;
+}
+
 template <typename T>
 std::vector<double> SlotsFromIntegral(const std::vector<T> &values,
                                       std::size_t slot_count)
@@ -195,14 +197,6 @@ std::vector<double> SlotsFromIntegral(const std::vector<T> &values,
     std::vector<double> s(slot_count, 0.0);
     for (std::size_t i = 0; i < values.size(); ++i)
         s[i] = static_cast<double>(values[i]);
-    return s;
-}
-
-std::vector<double> SlotsFromDouble(const std::vector<double> &values,
-                                    std::size_t slot_count)
-{
-    std::vector<double> s(slot_count, 0.0);
-    for (std::size_t i = 0; i < values.size(); ++i) s[i] = values[i];
     return s;
 }
 
@@ -242,7 +236,6 @@ double relational_query3(size_t num)
     TFHESecretKey sk;
     TFHEEvalKey ek;
     constexpr std::size_t kKeyDomain = 4;
-    constexpr std::size_t kSegmentDomain = 8; // mktsegment 0..7
     std::uniform_int_distribution<uint32_t> shipdate_message(10000, 20000);
     std::uniform_int_distribution<uint32_t> orderdate_message(10000, 20000);
     std::uniform_int_distribution<uint32_t> seg_message(0, 4);
@@ -281,29 +274,41 @@ double relational_query3(size_t num)
         cust_custkey[k] = k;
         cust_mktsegment[k] = seg_message(engine);
     }
+    uint64_t pred_date = 15000;
+    uint64_t pred_segment = 1; // BUILDING
+    if (num > 0) {
+        line_orderkey[0] = 0;
+        ship_date[0] = pred_date + 1;
+        revenue[0] = std::max<double>(revenue[0], 1.0);
+        order_custkey[0] = 0;
+        order_date[0] = pred_date - 1;
+        cust_mktsegment[0] = pred_segment;
+    }
 
     // -------- TFHE encryption of WHERE-relevant columns only --------
     uint32_t num_bits = 16;
     uint32_t compprecision = 32;
     uint32_t scale_bits = std::numeric_limits<Lvl2::T>::digits - num_bits - 1;
-    std::vector<TLWELvl2> shipdate_ciphers(num), orderdate_ciphers(kKeyDomain),
-        mktsegment_ciphers(kKeyDomain);
+    uint32_t segment_bits = 3;
+    uint32_t segment_scale_bits =
+        std::numeric_limits<Lvl1::T>::digits - segment_bits - 1;
+    std::vector<TLWELvl2> shipdate_ciphers(num), orderdate_ciphers(kKeyDomain);
+    std::vector<TLWELvl1> mktsegment_ciphers(kKeyDomain);
     for (size_t i = 0; i < num; i++)
         shipdate_ciphers[i] = tlweSymInt32Encrypt<Lvl2>(
             ship_date[i], Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
     for (size_t j = 0; j < kKeyDomain; j++) {
         orderdate_ciphers[j] = tlweSymInt32Encrypt<Lvl2>(
             order_date[j], Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
-        mktsegment_ciphers[j] = tlweSymInt32Encrypt<Lvl2>(
-            cust_mktsegment[j], Lvl2::α, pow(2., scale_bits),
-            sk.key.get<Lvl2>());
+        mktsegment_ciphers[j] = tlweSymInt32Encrypt<Lvl1>(
+            cust_mktsegment[j], Lvl1::α, pow(2., segment_scale_bits),
+            sk.key.get<Lvl1>());
     }
-    uint64_t pred_date = 15000;
-    uint64_t pred_segment = 1; // BUILDING
     TLWELvl2 pred_date_ct = tlweSymInt32Encrypt<Lvl2>(
         pred_date, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
-    TLWELvl2 pred_segment_ct = tlweSymInt32Encrypt<Lvl2>(
-        pred_segment, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
+    TLWELvl1 pred_segment_ct = tlweSymInt32Encrypt<Lvl1>(
+        pred_segment, Lvl1::α, pow(2., segment_scale_bits),
+        sk.key.get<Lvl1>());
 
     // -------- WHERE in TFHE 3-PBS (3 columns, one mask per row in each table) --------
     std::vector<TLWELvl1> line_mask(num), order_mask(kKeyDomain),
@@ -325,7 +330,7 @@ double relational_query3(size_t num)
     }
     for (size_t k = 0; k < kKeyDomain; k++) {
         TLWELvl1 raw;
-        equal<Lvl2>(mktsegment_ciphers[k], pred_segment_ct, raw, compprecision,
+        equal<Lvl1>(mktsegment_ciphers[k], pred_segment_ct, raw, segment_bits,
                     ek, micro_pack, LOGIC);
         lift_and_and(raw, raw, cust_mask[k], 29, ek);
     }
@@ -370,7 +375,8 @@ double relational_query3(size_t num)
     parms.set_coeff_modulus(seal::CoeffModulus::Create(
         poly_modulus_degree,
         {59, 42, 42, 42, 42, 42, 42, 42, 42, 45, 45, 45, 45, 45, 45, 45, 45,
-         45, 45, 45, 45, 45, 45, 45, 59}));
+         45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
+         59}));
     seal::SEALContext context(parms, true, seal::sec_level_type::none);
     seal::KeyGenerator keygen(context);
     seal::SecretKey seal_secret_key = keygen.secret_key();
@@ -432,90 +438,65 @@ double relational_query3(size_t num)
     report_repack(order_mask_ckks, plain_order_mask, "order_mask");
     report_repack(cust_mask_ckks, plain_cust_mask, "cust_mask");
 
-    // -------- 2. Encrypt JOIN keys and group-by payload as CKKS --------
-    double scale = std::pow(2.0, 40);
-    seal::Plaintext plain_tmp;
-    ckks_encoder.encode(SlotsFromIntegral(order_custkey,
-                                          ckks_encoder.slot_count()),
-                        scale, plain_tmp);
-    seal::Ciphertext order_custkey_ct;
-    encryptor.encrypt(plain_tmp, order_custkey_ct);
-    ckks_encoder.encode(SlotsFromIntegral(cust_custkey,
-                                          ckks_encoder.slot_count()),
-                        scale, plain_tmp);
-    seal::Ciphertext cust_custkey_ct;
-    encryptor.encrypt(plain_tmp, cust_custkey_ct);
-    ckks_encoder.encode(SlotsFromIntegral(line_orderkey,
-                                          ckks_encoder.slot_count()),
-                        scale, plain_tmp);
-    seal::Ciphertext line_orderkey_ct;
-    encryptor.encrypt(plain_tmp, line_orderkey_ct);
-    ckks_encoder.encode(SlotsFromIntegral(order_orderkey,
-                                          ckks_encoder.slot_count()),
-                        scale, plain_tmp);
-    seal::Ciphertext order_orderkey_ct;
-    encryptor.encrypt(plain_tmp, order_orderkey_ct);
+    // -------- 2. Encrypted-key joins (server-side CKKS Lagrange) --------
+    const double key_scale = std::pow(2.0, 40);
+    auto line_orderkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(line_orderkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto order_orderkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(order_orderkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto order_custkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(order_custkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto cust_custkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(cust_custkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
 
-    // -------- 3. JOIN customer→orders on custkey via CKKS Lagrange --------
     std::vector<double> key_domain(kKeyDomain);
-    for (size_t j = 0; j < kKeyDomain; j++) key_domain[j] = double(j);
+    for (size_t j = 0; j < kKeyDomain; ++j)
+        key_domain[j] = static_cast<double>(j);
 
-    auto order_custkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        order_custkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
-    auto cust_custkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        cust_custkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
-    auto cust_mask_on_orders = tfhepp_ckks::LookupJoinFromEncryptedMasks(
-        order_custkey_masks, cust_custkey_masks, cust_mask_ckks,
-        kKeyDomain, relin_keys, galois_keys, evaluator);
-
-    // AND with order_mask → order_filter (still indexed by orders rows)
-    auto order_filter =
-        MultiplyAndRescale(cust_mask_on_orders, order_mask_ckks, relin_keys,
-                           evaluator);
-
-    // -------- 4. JOIN orders→lineitem on orderkey via CKKS Lagrange --------
     auto line_orderkey_masks = tfhepp_ckks::BuildLagrangeMasks(
         line_orderkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
     auto order_orderkey_masks = tfhepp_ckks::BuildLagrangeMasks(
         order_orderkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+    auto order_custkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        order_custkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+    auto cust_custkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        cust_custkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+
+    auto cust_mask_on_orders = tfhepp_ckks::LookupJoinFromEncryptedMasks(
+        order_custkey_masks, cust_custkey_masks, cust_mask_ckks,
+        kKeyDomain, kKeyDomain, relin_keys, galois_keys, ckks_encoder, context,
+        evaluator);
+    auto order_filter =
+        MultiplyAndRescale(cust_mask_on_orders, order_mask_ckks, relin_keys,
+                           evaluator);
     auto order_filter_on_line = tfhepp_ckks::LookupJoinFromEncryptedMasks(
         line_orderkey_masks, order_orderkey_masks, order_filter,
-        kKeyDomain, relin_keys, galois_keys, evaluator);
+        kKeyDomain, num, relin_keys, galois_keys, ckks_encoder, context,
+        evaluator);
+    ApplyActiveSlotMaskInPlace(order_filter_on_line, num, ckks_encoder, context,
+                                evaluator);
 
-    // AND with l_mask (lineitem-level shipdate filter)
     auto row_filter =
         MultiplyAndRescale(order_filter_on_line, line_mask_ckks, relin_keys,
                            evaluator);
 
-    // -------- 5. Multiply by revenue and group by lineitem.orderkey --------
+    // -------- 3. Multiply by revenue and group by encrypted lineitem.orderkey --------
     double qd = LastCoeffModulus(row_filter, context);
     auto revenue_ct = EncryptAtLevel(
         SlotsFromDouble(revenue, ckks_encoder.slot_count()),
         row_filter.parms_id(), qd, ckks_encoder, encryptor);
     auto filtered_revenue =
         MultiplyAndRescale(row_filter, revenue_ct, relin_keys, evaluator);
-    // Zero out padding slots so noise outside the active region does not leak
-    // into the rotate-and-sum aggregate.
     ApplyActiveSlotMaskInPlace(filtered_revenue, num, ckks_encoder, context,
                                 evaluator);
 
-    // GROUP BY: reuse line_orderkey_masks but they may be at a higher level;
-    // MultiplyAndRescale will mod-switch automatically.
-    std::vector<seal::Ciphertext> grouped(kKeyDomain);
-    int logrow = static_cast<int>(std::ceil(std::log2(num)));
-    for (size_t g = 0; g < kKeyDomain; g++) {
-        auto weighted = MultiplyAndRescale(filtered_revenue,
-                                           line_orderkey_masks[g],
-                                           relin_keys, evaluator);
-        for (int b = 0; b < logrow; ++b) {
-            seal::Ciphertext temp = weighted;
-            size_t step = 1ULL << (logrow - b - 1);
-            evaluator.rotate_vector_inplace(temp, static_cast<int>(step),
-                                             galois_keys);
-            evaluator.add_inplace(weighted, temp);
-        }
-        grouped[g] = std::move(weighted);
-    }
+    auto grouped = tfhepp_ckks::GroupBySumFromEncryptedMasks(
+        filtered_revenue, line_orderkey_masks, num, relin_keys, galois_keys,
+        evaluator);
     end = std::chrono::system_clock::now();
     ckks_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                     end - start).count();
@@ -528,20 +509,26 @@ double relational_query3(size_t num)
               << " ms" << std::endl;
     std::cout << "Encrypted query result: " << std::endl;
     std::cout << std::setw(12) << "orderkey" << "|" << std::setw(12)
-              << "revenue" << std::endl;
+              << "orderdate" << "|" << std::setw(12) << "shippriority"
+              << "|" << std::setw(12) << "revenue" << std::endl;
     for (size_t g = 0; g < kKeyDomain; g++) {
         std::vector<double> dec;
         seal::Plaintext plain_g;
         decryptor.decrypt(grouped[g], plain_g);
         ckks_encoder.decode(plain_g, dec);
         std::cout << std::setw(12) << g << "|" << std::setw(12)
+                  << order_date[g] << "|" << std::setw(12)
+                  << order_shippriority[g] << "|" << std::setw(12)
                   << std::round(dec[0]) << std::endl;
     }
     std::cout << "Plain query result: " << std::endl;
     std::cout << std::setw(12) << "orderkey" << "|" << std::setw(12)
-              << "revenue" << std::endl;
+              << "orderdate" << "|" << std::setw(12) << "shippriority"
+              << "|" << std::setw(12) << "revenue" << std::endl;
     for (size_t g = 0; g < kKeyDomain; g++) {
         std::cout << std::setw(12) << g << "|" << std::setw(12)
+                  << order_date[g] << "|" << std::setw(12)
+                  << order_shippriority[g] << "|" << std::setw(12)
                   << plain_agg[g] << std::endl;
     }
     std::cout << std::endl;
@@ -554,8 +541,8 @@ int main(int argc, char **argv)
     if (argc > 1) num = static_cast<size_t>(std::stoull(argv[1]));
     std::cout << "----------------------------------------------------"
               << std::endl;
-    std::cout << "TPC-H Q3 (compliant): WHERE = TFHE 3-PBS, "
-              << "JOIN+GROUP BY = CKKS Lagrange (Algorithm 4.3)" << std::endl;
+    std::cout << "TPC-H Q3 (strict Chapter 4): WHERE = TFHE 3-PBS, "
+              << "JOIN+GROUP BY = CKKS Lagrange" << std::endl;
     std::cout << std::endl;
     relational_query3(num);
     return 0;

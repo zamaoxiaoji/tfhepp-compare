@@ -1,0 +1,113 @@
+$ /home/wrn/AE_submit/SOTA/HE3DB/build/bin/relational_queries_test_16bits
+# started: 2026-05-16 14:07:16
+-------------------------------------------------------------------------------
+The evaluation of Relational DB queries in HE3DB [103]
+
+
+
+Relational SQL Query6 Test: 
+--------------------------------------------------------
+Records: 1024
+Filtering finish
+Aggregation :
+Generating Parameters...
+Generating Conversion Key...
+Starting Conversion...
+Repack average error = 0.000000 ~ 2^-25.7
+Aggregating price and discount ..
+Remian modulus: 2
+Query Evaluation Time: 2.20433e+06 ms
+Encrypted query result: 
+     revenue
+         200
+Plain query result: 
+     revenue
+         200
+
+
+
+
+-------------------------------------------------------------------------------
+The evaluation of Relational DB queries in HE3DB [103]
+
+
+
+Relational SQL Query6 Test: 
+--------------------------------------------------------
+Records: 2048
+Filtering finish
+Aggregation :
+Generating Parameters...
+Generating Conversion Key...
+Starting Conversion...
+Repack average error = 0.000000 ~ 2^-26.4
+Aggregating price and discount ..
+Remian modulus: 2
+Query Evaluation Time: 4.6462e+06 ms
+Encrypted query result: 
+     revenue
+         231
+Plain query result: 
+     revenue
+         231
+
+
+
+
+-------------------------------------------------------------------------------
+The evaluation of Relational DB queries in HE3DB [103]
+
+
+
+Relational SQL Query6 Test: 
+--------------------------------------------------------
+Records: 4096
+Filtering finish
+Aggregation :
+Generating Parameters...
+Generating Conversion Key...
+Starting Conversion...
+Repack average error = 0.000000 ~ 2^-26.6
+Aggregating price and discount ..
+Remian modulus: 2
+Query Evaluation Time: 8.776e+06 ms
+Encrypted query result: 
+     revenue
+         358
+Plain query result: 
+     revenue
+         358
+
+
+
+
+-------------------------------------------------------------------------------
+The evaluation of Relational DB queries in HE3DB [103]
+
+
+
+Relational SQL Query6 Test: 
+--------------------------------------------------------
+Records: 8192
+Filtering finish
+Aggregation :
+Generating Parameters...
+Generating Conversion Key...
+Starting Conversion...
+Repack average error = 0.000000 ~ 2^-27.0
+Aggregating price and discount ..
+Remian modulus: 2
+Query Evaluation Time: 2.10871e+07 ms
+Encrypted query result: 
+     revenue
+         454
+Plain query result: 
+     revenue
+         454
+
+
+
+
+# finished: 2026-05-17 00:29:35
+# returncode: 0
+# wall_ms: 37338578.008

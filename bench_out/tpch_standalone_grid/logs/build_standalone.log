@@ -1,0 +1,41 @@
+$ cmake --build build --target tpch_q14_3pbs tpch_q3_3pbs tpch_q5_3pbs tpch_q6_3pbs -j2
+# started: 2026-05-15 21:28:52
+[ 11%] Built target blake3
+[ 11%] Built target AES
+[ 16%] Built target spqlios
+[ 33%] Built target tfhe++
+[ 38%] Built target tfhepp_compare
+[ 91%] Built target seal
+[ 97%] Built target tfhepp_ckks_repack
+Consolidate compiler generated dependencies of target tpch_q14_3pbs
+[100%] Built target tpch_q14_3pbs
+[  0%] Built target AES
+[ 11%] Built target blake3
+[ 16%] Built target spqlios
+[ 33%] Built target tfhe++
+[ 38%] Built target tfhepp_compare
+[ 91%] Built target seal
+[ 97%] Built target tfhepp_ckks_repack
+Consolidate compiler generated dependencies of target tpch_q3_3pbs
+[100%] Built target tpch_q3_3pbs
+[  0%] Built target AES
+[ 11%] Built target blake3
+[ 16%] Built target spqlios
+[ 33%] Built target tfhe++
+[ 38%] Built target tfhepp_compare
+[ 91%] Built target seal
+[ 97%] Built target tfhepp_ckks_repack
+Consolidate compiler generated dependencies of target tpch_q5_3pbs
+[100%] Built target tpch_q5_3pbs
+[ 11%] Built target blake3
+[ 11%] Built target AES
+[ 16%] Built target spqlios
+[ 33%] Built target tfhe++
+[ 38%] Built target tfhepp_compare
+[ 91%] Built target seal
+[ 97%] Built target tfhepp_ckks_repack
+Consolidate compiler generated dependencies of target tpch_q6_3pbs
+[100%] Built target tpch_q6_3pbs
+# finished: 2026-05-15 21:28:53
+# returncode: 0
+# wall_ms: 1005.266

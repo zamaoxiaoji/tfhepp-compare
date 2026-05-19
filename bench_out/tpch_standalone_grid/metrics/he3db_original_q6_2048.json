@@ -1,0 +1,25 @@
+{
+  "accuracy_percent": 100.0,
+  "ckks_or_aggregation_ms": null,
+  "correct_count": 1,
+  "encrypted_values": [
+    231.0
+  ],
+  "filtering_ms": null,
+  "log": "bench_out/tpch_standalone_grid/logs/he3db_original_q6_1024_8192_original_main.log",
+  "max_abs_error": 0.0,
+  "note": "wall_ms is for the whole HE3DB original binary run",
+  "plain_values": [
+    231.0
+  ],
+  "query": "q6",
+  "repack_avg_error": 0.0,
+  "reported_total_ms": 4646200.0,
+  "result_count": 1,
+  "returncode": 0,
+  "rows": 2048,
+  "system": "he3db_original",
+  "timestamp": "2026-05-17 00:29:35",
+  "tolerance": 0.5,
+  "wall_ms": 37338578.0077842
+}

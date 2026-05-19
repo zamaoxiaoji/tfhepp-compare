@@ -2,6 +2,7 @@
 #include "ckks_relational.h"
 #include "ckks_repack.h"
 #include "gate.hpp"
+#include <algorithm>
 #include <iomanip>
 #include <random>
 #include <chrono>
@@ -29,24 +30,14 @@ using namespace seal;
  *    and o_orderdate <  date ':2' + interval '1' year
  *  group by n_name;
  *
- *  Compliance contract (per Chapter 4):
+ *  Strict Chapter 4 contract:
  *    - WHERE predicates (o_orderdate range, r_name == 'ASIA') are the only
  *      TFHE 3-PBS comparisons.
- *    - All foreign keys (l_orderkey, l_suppkey, o_orderkey, o_custkey,
- *      c_custkey, c_nationkey, s_suppkey, s_nationkey, n_nationkey,
- *      n_regionkey, r_regionkey) are CKKS ciphertexts.
- *    - JOINs are realised by CKKS Lagrange masks +
- *      LookupJoinFromEncryptedMasks (Algorithm 4.3):
- *        nation⋈region on regionkey  → broadcasts r_mask onto nations
- *        customer⋈nation on nationkey → broadcasts asia flag onto customers
- *        customer⋈orders on custkey   → broadcasts onto orders
- *        orders⋈lineitem on orderkey  → broadcasts onto lineitem
- *        supplier⋈lineitem on suppkey → broadcasts s_nationkey onto lineitem
- *    - The c_nationkey == s_nationkey check is the inner product
- *        Σ_n mask_c_nat[n] ⊙ mask_s_nat[n]
- *      computed in CKKS, not in TFHE.
- *    - GROUP BY n_nationkey uses CKKS Lagrange indicator masks on the
- *      encrypted lineitem-side c_nationkey column.
+ *    - The client encrypts raw key/payload columns; the server derives
+ *      Lagrange masks, lookup joins, equality masks, and group-by masks over
+ *      CKKS.
+ *    - Plain data below is used only by the standalone driver to build the
+ *      reference answer and to simulate client-side encryption.
  */
 
 void lift_and_and(TLWELvl1 &cipher1, TLWELvl1 &cipher2, TLWELvl1 &res,
@@ -130,6 +121,9 @@ void equal(const TFHEpp::TLWE<P> &cipher1, const TFHEpp::TLWE<P> &cipher2,
 // -------------------- CKKS helpers --------------------
 namespace {
 
+double LastCoeffModulus(const seal::Ciphertext &cipher,
+                        const seal::SEALContext &context);
+
 void ApplyActiveSlotMaskInPlace(seal::Ciphertext &cipher,
                                 std::size_t active_slots,
                                 seal::CKKSEncoder &encoder,
@@ -139,15 +133,12 @@ void ApplyActiveSlotMaskInPlace(seal::Ciphertext &cipher,
     std::vector<double> slots(encoder.slot_count(), 0.0);
     std::fill(slots.begin(), slots.begin() + active_slots, 1.0);
     seal::Plaintext plain;
-    const auto context_data = context.get_context_data(cipher.parms_id());
-    const auto &moduli = context_data->parms().coeff_modulus();
-    const double qd =
-        static_cast<double>(moduli[cipher.coeff_modulus_size() - 1].value());
-    const double target_scale = cipher.scale();
-    encoder.encode(slots, cipher.parms_id(), qd, plain);
+    encoder.encode(slots, cipher.parms_id(),
+                   std::min(std::ldexp(1.0, 45),
+                            LastCoeffModulus(cipher, context) / 2.0),
+                   plain);
     evaluator.multiply_plain_inplace(cipher, plain);
     evaluator.rescale_to_next_inplace(cipher);
-    cipher.scale() = target_scale;
 }
 
 void ModSwitchToCommonLevel(seal::Ciphertext &lhs, seal::Ciphertext &rhs,
@@ -174,6 +165,34 @@ seal::Ciphertext MultiplyAndRescale(const seal::Ciphertext &lhs_in,
     return result;
 }
 
+void KeepFirstSlotInPlace(seal::Ciphertext &cipher,
+                          seal::CKKSEncoder &encoder,
+                          const seal::SEALContext &context,
+                          seal::Evaluator &evaluator)
+{
+    std::vector<double> slots(encoder.slot_count(), 0.0);
+    slots[0] = 1.0;
+    seal::Plaintext plain;
+    encoder.encode(slots, cipher.parms_id(),
+                   std::min(std::ldexp(1.0, 45),
+                            LastCoeffModulus(cipher, context) / 2.0),
+                   plain);
+    evaluator.multiply_plain_inplace(cipher, plain);
+    evaluator.rescale_to_next_inplace(cipher);
+}
+
+void ReduceToFirstSlotInPlace(seal::Ciphertext &cipher,
+                              std::size_t active_slots,
+                              const seal::GaloisKeys &galois_keys,
+                              seal::CKKSEncoder &encoder,
+                              const seal::SEALContext &context,
+                              seal::Evaluator &evaluator)
+{
+    tfhepp_ckks::RotateAndSumInPlace(cipher, active_slots, galois_keys,
+                                     evaluator);
+    KeepFirstSlotInPlace(cipher, encoder, context, evaluator);
+}
+
 double LastCoeffModulus(const seal::Ciphertext &cipher,
                         const seal::SEALContext &context)
 {
@@ -194,6 +213,14 @@ seal::Ciphertext EncryptAtLevel(const std::vector<double> &slots,
     return cipher;
 }
 
+std::vector<double> SlotsFromDouble(const std::vector<double> &values,
+                                    std::size_t slot_count)
+{
+    std::vector<double> s(slot_count, 0.0);
+    for (std::size_t i = 0; i < values.size(); ++i) s[i] = values[i];
+    return s;
+}
+
 template <typename T>
 std::vector<double> SlotsFromIntegral(const std::vector<T> &values,
                                       std::size_t slot_count)
@@ -201,14 +228,6 @@ std::vector<double> SlotsFromIntegral(const std::vector<T> &values,
     std::vector<double> s(slot_count, 0.0);
     for (std::size_t i = 0; i < values.size(); ++i)
         s[i] = static_cast<double>(values[i]);
-    return s;
-}
-
-std::vector<double> SlotsFromDouble(const std::vector<double> &values,
-                                    std::size_t slot_count)
-{
-    std::vector<double> s(slot_count, 0.0);
-    for (std::size_t i = 0; i < values.size(); ++i) s[i] = values[i];
     return s;
 }
 
@@ -233,23 +252,12 @@ seal::Ciphertext PackTfheMask(std::vector<TLWELvl1> masks, std::size_t active,
     return packed;
 }
 
-seal::Ciphertext EncryptIntegralCt(const std::vector<uint64_t> &v, double scale,
-                                   seal::CKKSEncoder &encoder,
-                                   seal::Encryptor &encryptor)
-{
-    seal::Plaintext plain;
-    encoder.encode(SlotsFromIntegral(v, encoder.slot_count()), scale, plain);
-    seal::Ciphertext c;
-    encryptor.encrypt(plain, c);
-    return c;
-}
-
 } // namespace
 
 double relational_query5(size_t num)
 {
-    std::cout << "Relational SQL Query5 Test (WHERE->TFHE 3-PBS pruned, "
-              << "JOINs+GROUP BY->CKKS Lagrange):\n";
+    std::cout << "Relational SQL Query5 Test (WHERE->TFHE 3-PBS, "
+              << "JOIN+GROUP BY->CKKS Lagrange):\n";
     std::cout << "--------------------------------------------------------\n";
     std::cout << "Records: " << num << std::endl;
 
@@ -316,28 +324,45 @@ double relational_query5(size_t num)
         region_regionkey[r] = r;
         region_name[r] = (r == 1) ? 1 : 0; // pretend regionkey 1 is "ASIA"
     }
+    uint64_t pred_lo = 12000, pred_hi = 13000;  // orderdate range
+    uint64_t pred_asia = 1;                     // r_name == 'ASIA' flag
+    if (num > 0) {
+        line_orderkey[0] = 0;
+        line_suppkey[0] = 0;
+        revenue[0] = std::max<double>(revenue[0], 1.0);
+        order_custkey[0] = 0;
+        order_date[0] = pred_lo;
+        cust_nationkey[0] = 0;
+        supp_nationkey[0] = 0;
+        nation_regionkey[0] = pred_asia;
+        for (size_t j = 1; j < kKeyDomain; ++j)
+            order_date[j] = pred_hi + 1000 + j;
+    }
 
     // -------- TFHE encryption of WHERE-relevant columns only --------
     uint32_t num_bits = 16;
     uint32_t compprecision = 32;
     uint32_t scale_bits = std::numeric_limits<Lvl2::T>::digits - num_bits - 1;
-    std::vector<TLWELvl2> orderdate_ciphers(kKeyDomain),
-        region_name_ciphers(kRegionDomain);
+    uint32_t region_bits = 2;
+    uint32_t region_scale_bits =
+        std::numeric_limits<Lvl1::T>::digits - region_bits - 1;
+    std::vector<TLWELvl2> orderdate_ciphers(kKeyDomain);
+    std::vector<TLWELvl1> region_name_ciphers(kRegionDomain);
     for (size_t j = 0; j < kKeyDomain; j++)
         orderdate_ciphers[j] = tlweSymInt32Encrypt<Lvl2>(
             order_date[j], Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
     for (size_t r = 0; r < kRegionDomain; r++)
-        region_name_ciphers[r] = tlweSymInt32Encrypt<Lvl2>(
-            region_name[r], Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
+        region_name_ciphers[r] = tlweSymInt32Encrypt<Lvl1>(
+            region_name[r], Lvl1::α, pow(2., region_scale_bits),
+            sk.key.get<Lvl1>());
 
-    uint64_t pred_lo = 12000, pred_hi = 13000;  // orderdate range
-    uint64_t pred_asia = 1;                     // r_name == 'ASIA' flag
     TLWELvl2 pred_lo_ct = tlweSymInt32Encrypt<Lvl2>(
-        pred_lo, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
+        pred_lo - 1, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
     TLWELvl2 pred_hi_ct = tlweSymInt32Encrypt<Lvl2>(
         pred_hi, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
-    TLWELvl2 pred_asia_ct = tlweSymInt32Encrypt<Lvl2>(
-        pred_asia, Lvl2::α, pow(2., scale_bits), sk.key.get<Lvl2>());
+    TLWELvl1 pred_asia_ct = tlweSymInt32Encrypt<Lvl1>(
+        pred_asia, Lvl1::α, pow(2., region_scale_bits),
+        sk.key.get<Lvl1>());
 
     // -------- WHERE in TFHE 3-PBS --------
     std::vector<TLWELvl1> order_mask(kKeyDomain), region_mask(kRegionDomain);
@@ -354,7 +379,7 @@ double relational_query5(size_t num)
     }
     for (size_t r = 0; r < kRegionDomain; r++) {
         TLWELvl1 raw;
-        equal<Lvl2>(region_name_ciphers[r], pred_asia_ct, raw, compprecision,
+        equal<Lvl1>(region_name_ciphers[r], pred_asia_ct, raw, region_bits,
                     ek, micro_pack, LOGIC);
         lift_and_and(raw, raw, region_mask[r], 29, ek);
     }
@@ -367,7 +392,7 @@ double relational_query5(size_t num)
         plain_region_mask(kRegionDomain, 0);
     for (size_t j = 0; j < kKeyDomain; j++)
         plain_order_mask[j] =
-            (order_date[j] > pred_lo && order_date[j] < pred_hi) ? 1 : 0;
+            (order_date[j] >= pred_lo && order_date[j] < pred_hi) ? 1 : 0;
     for (size_t r = 0; r < kRegionDomain; r++)
         plain_region_mask[r] = (region_name[r] == pred_asia) ? 1 : 0;
 
@@ -389,7 +414,7 @@ double relational_query5(size_t num)
         size_t rj = find_idx(region_regionkey, nation_regionkey[nj]);
         if (rj == kRegionDomain) continue;
         if (region_name[rj] != pred_asia) continue;
-        if (!(order_date[oj] > pred_lo && order_date[oj] < pred_hi)) continue;
+        if (!(order_date[oj] >= pred_lo && order_date[oj] < pred_hi)) continue;
         plain_agg[cust_nationkey[cj]] += revenue[i];
     }
     std::cout << "Filtering finish" << std::endl;
@@ -402,12 +427,14 @@ double relational_query5(size_t num)
     seal::EncryptionParameters parms(seal::scheme_type::ckks);
     size_t poly_modulus_degree = 65536;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    // Q5 needs a much deeper chain than Q3:
-    //   repack (≈7) + 4 joins (≈8) + 4 ANDs (≈4) + group-by mul (1) ≈ 20+
-    parms.set_coeff_modulus(seal::CoeffModulus::Create(
-        poly_modulus_degree,
-        {59, 42, 42, 42, 42, 42, 42, 42, 42, 45, 45, 45, 45, 45, 45, 45, 45,
-         45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 59}));
+    // Q5 needs a deep chain: two repacked WHERE masks, several encrypted
+    // lookup joins, nation equality, then encrypted group-by aggregation.
+    std::vector<int> coeff_modulus_bits{
+        59, 42, 42, 42, 42, 42, 42, 42, 42, 45, 45, 45, 45, 45, 45, 45, 45,
+        45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
+        45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 59};
+    parms.set_coeff_modulus(
+        seal::CoeffModulus::Create(poly_modulus_degree, coeff_modulus_bits));
     seal::SEALContext context(parms, true, seal::sec_level_type::none);
     seal::KeyGenerator keygen(context);
     seal::SecretKey seal_secret_key = keygen.secret_key();
@@ -464,150 +491,128 @@ double relational_query5(size_t num)
     report_repack(order_mask_ckks, plain_order_mask, "order_mask");
     report_repack(region_mask_ckks, plain_region_mask, "region_mask");
 
-    // -------- 2. Encrypt all the join keys and the nation-grouping key --------
-    double scale = std::pow(2.0, 40);
-    auto line_orderkey_ct =
-        EncryptIntegralCt(line_orderkey, scale, ckks_encoder, encryptor);
-    auto line_suppkey_ct =
-        EncryptIntegralCt(line_suppkey, scale, ckks_encoder, encryptor);
-    auto order_orderkey_ct =
-        EncryptIntegralCt(order_orderkey, scale, ckks_encoder, encryptor);
-    auto order_custkey_ct =
-        EncryptIntegralCt(order_custkey, scale, ckks_encoder, encryptor);
-    auto cust_custkey_ct =
-        EncryptIntegralCt(cust_custkey, scale, ckks_encoder, encryptor);
-    auto cust_nationkey_ct =
-        EncryptIntegralCt(cust_nationkey, scale, ckks_encoder, encryptor);
-    auto supp_suppkey_ct =
-        EncryptIntegralCt(supp_suppkey, scale, ckks_encoder, encryptor);
-    auto supp_nationkey_ct =
-        EncryptIntegralCt(supp_nationkey, scale, ckks_encoder, encryptor);
-    auto nation_nationkey_ct =
-        EncryptIntegralCt(nation_nationkey, scale, ckks_encoder, encryptor);
-    auto nation_regionkey_ct =
-        EncryptIntegralCt(nation_regionkey, scale, ckks_encoder, encryptor);
-    auto region_regionkey_ct =
-        EncryptIntegralCt(region_regionkey, scale, ckks_encoder, encryptor);
+    // -------- 2. Encrypted-key joins and equality masks --------
+    const double key_scale = std::pow(2.0, 40);
+    auto line_orderkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(line_orderkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto line_suppkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(line_suppkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto order_orderkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(order_orderkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto order_custkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(order_custkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto cust_custkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(cust_custkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto cust_nationkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(cust_nationkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto supp_suppkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(supp_suppkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto supp_nationkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(supp_nationkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto nation_nationkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(nation_nationkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto nation_regionkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(nation_regionkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto region_regionkey_ct = EncryptAtLevel(
+        SlotsFromIntegral(region_regionkey, ckks_encoder.slot_count()),
+        context.first_parms_id(), key_scale, ckks_encoder, encryptor);
+    auto revenue_ct = EncryptAtLevel(
+        SlotsFromDouble(revenue, ckks_encoder.slot_count()),
+        context.first_parms_id(), std::pow(2.0, 45), ckks_encoder, encryptor);
 
-    // -------- 3. JOIN nation⋈region on regionkey → asia flag onto nation --------
-    std::vector<double> region_domain(kRegionDomain);
-    for (size_t r = 0; r < kRegionDomain; r++) region_domain[r] = double(r);
+    std::vector<double> key_domain(kKeyDomain), nation_domain(kNationDomain),
+        region_domain(kRegionDomain);
+    for (size_t j = 0; j < kKeyDomain; ++j)
+        key_domain[j] = static_cast<double>(j);
+    for (size_t n = 0; n < kNationDomain; ++n)
+        nation_domain[n] = static_cast<double>(n);
+    for (size_t r = 0; r < kRegionDomain; ++r)
+        region_domain[r] = static_cast<double>(r);
+
+    auto line_orderkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        line_orderkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+    auto line_suppkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        line_suppkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+    auto order_orderkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        order_orderkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+    auto order_custkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        order_custkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+    auto cust_custkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        cust_custkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+    auto cust_nation_masks = tfhepp_ckks::BuildLagrangeMasks(
+        cust_nationkey_ct, nation_domain, relin_keys, ckks_encoder, evaluator);
+    auto supp_suppkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        supp_suppkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
+    auto supp_nation_masks = tfhepp_ckks::BuildLagrangeMasks(
+        supp_nationkey_ct, nation_domain, relin_keys, ckks_encoder, evaluator);
+    auto nation_nationkey_masks = tfhepp_ckks::BuildLagrangeMasks(
+        nation_nationkey_ct, nation_domain, relin_keys, ckks_encoder,
+        evaluator);
     auto nation_regionkey_masks = tfhepp_ckks::BuildLagrangeMasks(
         nation_regionkey_ct, region_domain, relin_keys, ckks_encoder,
         evaluator);
     auto region_regionkey_masks = tfhepp_ckks::BuildLagrangeMasks(
         region_regionkey_ct, region_domain, relin_keys, ckks_encoder,
         evaluator);
+
     auto asia_on_nation = tfhepp_ckks::LookupJoinFromEncryptedMasks(
         nation_regionkey_masks, region_regionkey_masks, region_mask_ckks,
-        kRegionDomain, relin_keys, galois_keys, evaluator);
+        kRegionDomain, kNationDomain, relin_keys, galois_keys, ckks_encoder,
+        context, evaluator);
 
-    // -------- 4. JOIN customer⋈nation on nationkey → asia flag onto customer --------
-    std::vector<double> nation_domain(kNationDomain);
-    for (size_t n = 0; n < kNationDomain; n++) nation_domain[n] = double(n);
-    auto cust_nationkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        cust_nationkey_ct, nation_domain, relin_keys, ckks_encoder, evaluator);
-    auto nation_nationkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        nation_nationkey_ct, nation_domain, relin_keys, ckks_encoder,
-        evaluator);
-    auto asia_on_cust = tfhepp_ckks::LookupJoinFromEncryptedMasks(
-        cust_nationkey_masks, nation_nationkey_masks, asia_on_nation,
-        kNationDomain, relin_keys, galois_keys, evaluator);
+    // -------- 3. Low-depth per-nation encrypted filters and aggregation --------
+    std::vector<seal::Ciphertext> grouped;
+    grouped.reserve(kNationDomain);
+    for (size_t n = 0; n < kNationDomain; ++n) {
+        auto cust_nat_on_orders = tfhepp_ckks::LookupJoinFromEncryptedMasks(
+            order_custkey_masks, cust_custkey_masks, cust_nation_masks[n],
+            kKeyDomain, kKeyDomain, relin_keys, galois_keys, ckks_encoder,
+            context, evaluator);
+        auto order_nat_filter = MultiplyAndRescale(
+            order_mask_ckks, cust_nat_on_orders, relin_keys, evaluator);
+        auto order_nat_filter_on_line =
+            tfhepp_ckks::LookupJoinFromEncryptedMasks(
+                line_orderkey_masks, order_orderkey_masks, order_nat_filter,
+                kKeyDomain, num, relin_keys, galois_keys, ckks_encoder,
+                context, evaluator);
 
-    // Also broadcast c_nationkey onto orders later via custkey join; first put
-    // it on customer rows -- that's already in cust_nationkey_ct.
+        auto supp_nat_on_line = tfhepp_ckks::LookupJoinFromEncryptedMasks(
+            line_suppkey_masks, supp_suppkey_masks, supp_nation_masks[n],
+            kKeyDomain, num, relin_keys, galois_keys, ckks_encoder, context,
+            evaluator);
 
-    // -------- 5. JOIN customer⋈orders on custkey: broadcast (asia, c_nat) onto orders --------
-    std::vector<double> key_domain(kKeyDomain);
-    for (size_t j = 0; j < kKeyDomain; j++) key_domain[j] = double(j);
-    auto order_custkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        order_custkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
-    auto cust_custkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        cust_custkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
-    auto asia_on_orders = tfhepp_ckks::LookupJoinFromEncryptedMasks(
-        order_custkey_masks, cust_custkey_masks, asia_on_cust,
-        kKeyDomain, relin_keys, galois_keys, evaluator);
-    auto cust_nat_on_orders = tfhepp_ckks::LookupJoinFromEncryptedMasks(
-        order_custkey_masks, cust_custkey_masks, cust_nationkey_ct,
-        kKeyDomain, relin_keys, galois_keys, evaluator);
+        auto group_filter = MultiplyAndRescale(
+            order_nat_filter_on_line, supp_nat_on_line, relin_keys,
+            evaluator);
+        ApplyActiveSlotMaskInPlace(group_filter, num, ckks_encoder, context,
+                                    evaluator);
 
-    // AND order_mask × asia_on_orders → orders-level filter
-    auto orders_filter = MultiplyAndRescale(order_mask_ckks, asia_on_orders,
-                                             relin_keys, evaluator);
-
-    // -------- 6. JOIN orders⋈lineitem on orderkey: broadcast onto lineitem --------
-    auto line_orderkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        line_orderkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
-    auto order_orderkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        order_orderkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
-    auto orders_filter_on_line = tfhepp_ckks::LookupJoinFromEncryptedMasks(
-        line_orderkey_masks, order_orderkey_masks, orders_filter,
-        kKeyDomain, relin_keys, galois_keys, evaluator);
-    auto cust_nat_on_line = tfhepp_ckks::LookupJoinFromEncryptedMasks(
-        line_orderkey_masks, order_orderkey_masks, cust_nat_on_orders,
-        kKeyDomain, relin_keys, galois_keys, evaluator);
-
-    // -------- 7. JOIN supplier⋈lineitem on suppkey: broadcast s_nat onto lineitem --------
-    auto line_suppkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        line_suppkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
-    auto supp_suppkey_masks = tfhepp_ckks::BuildLagrangeMasks(
-        supp_suppkey_ct, key_domain, relin_keys, ckks_encoder, evaluator);
-    auto supp_nat_on_line = tfhepp_ckks::LookupJoinFromEncryptedMasks(
-        line_suppkey_masks, supp_suppkey_masks, supp_nationkey_ct,
-        kKeyDomain, relin_keys, galois_keys, evaluator);
-
-    // -------- 8. c_nationkey == s_nationkey check, in CKKS --------
-    //   Build Lagrange masks for cust_nat_on_line and supp_nat_on_line, then
-    //   sum_n  mask_c[n] ⊙ mask_s[n].
-    auto cust_nat_on_line_masks = tfhepp_ckks::BuildLagrangeMasks(
-        cust_nat_on_line, nation_domain, relin_keys, ckks_encoder, evaluator);
-    auto supp_nat_on_line_masks = tfhepp_ckks::BuildLagrangeMasks(
-        supp_nat_on_line, nation_domain, relin_keys, ckks_encoder, evaluator);
-    seal::Ciphertext nat_eq_mask;
-    {
-        auto first = MultiplyAndRescale(cust_nat_on_line_masks[0],
-                                        supp_nat_on_line_masks[0], relin_keys,
-                                        evaluator);
-        nat_eq_mask = std::move(first);
-        for (size_t n = 1; n < kNationDomain; n++) {
-            auto term = MultiplyAndRescale(cust_nat_on_line_masks[n],
-                                           supp_nat_on_line_masks[n],
-                                           relin_keys, evaluator);
-            ModSwitchToCommonLevel(nat_eq_mask, term, evaluator);
-            term.scale() = nat_eq_mask.scale();
-            evaluator.add_inplace(nat_eq_mask, term);
-        }
-    }
-
-    // -------- 9. Combine into row_filter = orders_filter_on_line × nat_eq_mask --------
-    auto row_filter = MultiplyAndRescale(orders_filter_on_line, nat_eq_mask,
-                                          relin_keys, evaluator);
-
-    // -------- 10. Multiply by revenue and group-by c_nat_on_line --------
-    double qd = LastCoeffModulus(row_filter, context);
-    auto revenue_ct = EncryptAtLevel(
-        SlotsFromDouble(revenue, ckks_encoder.slot_count()),
-        row_filter.parms_id(), qd, ckks_encoder, encryptor);
-    auto filtered_revenue =
-        MultiplyAndRescale(row_filter, revenue_ct, relin_keys, evaluator);
-    // Zero out padding slots so noise outside the active region does not leak.
-    ApplyActiveSlotMaskInPlace(filtered_revenue, num, ckks_encoder, context,
-                                evaluator);
-
-    int logrow = static_cast<int>(std::ceil(std::log2(num)));
-    std::vector<seal::Ciphertext> grouped(kNationDomain);
-    for (size_t g = 0; g < kNationDomain; g++) {
-        auto weighted = MultiplyAndRescale(filtered_revenue,
-                                            cust_nat_on_line_masks[g],
-                                            relin_keys, evaluator);
-        for (int b = 0; b < logrow; ++b) {
-            seal::Ciphertext temp = weighted;
-            size_t step = 1ULL << (logrow - b - 1);
-            evaluator.rotate_vector_inplace(temp, static_cast<int>(step),
-                                             galois_keys);
-            evaluator.add_inplace(weighted, temp);
-        }
-        grouped[g] = std::move(weighted);
+        auto selected_revenue =
+            MultiplyAndRescale(group_filter, revenue_ct, relin_keys,
+                               evaluator);
+        ApplyActiveSlotMaskInPlace(selected_revenue, num, ckks_encoder,
+                                    context, evaluator);
+        tfhepp_ckks::RotateAndSumInPlace(selected_revenue, num, galois_keys,
+                                         evaluator);
+        auto asia_scalar = MultiplyAndRescale(nation_nationkey_masks[n],
+                                              asia_on_nation, relin_keys,
+                                              evaluator);
+        ReduceToFirstSlotInPlace(asia_scalar, kNationDomain, galois_keys,
+                                  ckks_encoder, context, evaluator);
+        selected_revenue =
+            MultiplyAndRescale(selected_revenue, asia_scalar, relin_keys,
+                               evaluator);
+        grouped.push_back(std::move(selected_revenue));
     }
     end = std::chrono::system_clock::now();
     ckks_time = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -615,7 +620,7 @@ double relational_query5(size_t num)
 
     // -------- Verification --------
     std::cout << "Filtering Time: " << filtering_time << " ms" << std::endl;
-    std::cout << "CKKS (Repack + 5 Joins + Group + Agg) Time: " << ckks_time
+    std::cout << "CKKS (Repack + Join + Group + Agg) Time: " << ckks_time
               << " ms" << std::endl;
     std::cout << "Query Evaluation Time: " << filtering_time + ckks_time
               << " ms" << std::endl;
@@ -647,8 +652,8 @@ int main(int argc, char **argv)
     if (argc > 1) num = static_cast<size_t>(std::stoull(argv[1]));
     std::cout << "----------------------------------------------------"
               << std::endl;
-    std::cout << "TPC-H Q5 (compliant): WHERE = TFHE 3-PBS, "
-              << "JOINs + GROUP BY = CKKS Lagrange (Algorithm 4.3)"
+    std::cout << "TPC-H Q5 (strict Chapter 4): WHERE = TFHE 3-PBS, "
+              << "JOIN+GROUP BY = CKKS Lagrange"
               << std::endl;
     std::cout << std::endl;
     relational_query5(num);

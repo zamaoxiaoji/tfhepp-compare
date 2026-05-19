@@ -1,0 +1,32 @@
+$ /home/wrn/tfhepp-compare/build/test/tpch_q6_3pbs 8192
+# started: 2026-05-16 03:18:37
+-------------------------------------------------------------------------------
+TPC-H Q6 evaluated via 3-PBS pruned compare + repack-based CKKS aggregation
+
+Relational SQL Query6 Test (3-PBS pruned + CKKS repack): 
+--------------------------------------------------------
+Records: 8192
+Filtering finish
+Aggregation :
+Generating Parameters...
+Generating Conversion Key...
+Starting Conversion...
+Repack average error = 0.000610 ~ 2^-10.7
+Aggregating price and discount ..
+Remian modulus: 2
+Filtering Time: 8.06453e+06 ms
+Aggregation Time: 59040 ms
+Query Evaluation Time: 8.12357e+06 ms
+Encrypted query result: 
+     revenue
+         942
+Plain query result: 
+     revenue
+         704
+
+
+
+
+# finished: 2026-05-16 05:35:03
+# returncode: 0
+# wall_ms: 8186154.687

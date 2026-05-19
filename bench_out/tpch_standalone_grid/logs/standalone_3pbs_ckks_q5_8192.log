@@ -1,0 +1,18 @@
+$ /home/wrn/tfhepp-compare/build/test/tpch_q5_3pbs 8192
+# started: 2026-05-16 03:15:28
+----------------------------------------------------
+TPC-H Q5 (compliant): WHERE = TFHE 3-PBS, JOINs + GROUP BY = CKKS Lagrange (Algorithm 4.3)
+
+Relational SQL Query5 Test (WHERE->TFHE 3-PBS pruned, JOINs+GROUP BY->CKKS Lagrange):
+--------------------------------------------------------
+Records: 8192
+Filtering finish
+Aggregation :
+Generating Parameters...
+Generating Conversion Key...
+Starting Conversion...
+terminate called after throwing an instance of 'std::invalid_argument'
+  what():  scale out of bounds
+# finished: 2026-05-16 03:18:37
+# returncode: -6
+# wall_ms: 189684.667

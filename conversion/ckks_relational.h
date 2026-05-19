@@ -89,4 +89,13 @@ namespace tfhepp_ckks
         const seal::RelinKeys &relin_keys,
         const seal::GaloisKeys &galois_keys, seal::Evaluator &evaluator);
 
+    seal::Ciphertext LookupJoinFromEncryptedMasks(
+        const std::vector<seal::Ciphertext> &left_key_masks,
+        const std::vector<seal::Ciphertext> &right_key_masks,
+        const seal::Ciphertext &right_payload,
+        std::size_t right_active_slots, std::size_t left_active_slots,
+        const seal::RelinKeys &relin_keys,
+        const seal::GaloisKeys &galois_keys, seal::CKKSEncoder &encoder,
+        const seal::SEALContext &context, seal::Evaluator &evaluator);
+
 } // namespace tfhepp_ckks

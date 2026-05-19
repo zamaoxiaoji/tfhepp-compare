@@ -2,6 +2,7 @@
 #include "ckks_relational.h"
 #include "ckks_repack.h"
 #include "gate.hpp"
+#include <algorithm>
 #include <iomanip>
 #include <random>
 #include <chrono>
@@ -83,11 +84,8 @@ double relational_query6(size_t num)
     std::cout << "Records: " << num << std::endl;
     std::random_device seed_gen;
     std::default_random_engine engine(seed_gen());
-    using P = Lvl1;
     TFHESecretKey sk;
     TFHEEvalKey ek;
-    using bkP = Lvl01;
-    using iksP = Lvl10;
     std::uniform_int_distribution<uint32_t> shipdate_message(10000, 20000);
     std::uniform_int_distribution<uint32_t> discount_message(19000, 21000);
     std::uniform_int_distribution<uint32_t> quantity_message(20000, 40000);
@@ -114,16 +112,16 @@ double relational_query6(size_t num)
     uint64_t predicate3_value = 19900, predicate4_value = 20100,
              predicate5_value = 30000;
 
-    predicate1_cipher = tlweSymInt32Encrypt<Lvl2>(predicate1_value, Lvl2::α,
+    predicate1_cipher = tlweSymInt32Encrypt<Lvl2>(predicate1_value - 1, Lvl2::α,
                                                   pow(2., scale_bits),
                                                   sk.key.get<Lvl2>());
     predicate2_cipher = tlweSymInt32Encrypt<Lvl2>(predicate2_value, Lvl2::α,
                                                   pow(2., scale_bits),
                                                   sk.key.get<Lvl2>());
-    predicate3_cipher = tlweSymInt32Encrypt<Lvl2>(predicate3_value, Lvl2::α,
+    predicate3_cipher = tlweSymInt32Encrypt<Lvl2>(predicate3_value - 1, Lvl2::α,
                                                   pow(2., scale_bits),
                                                   sk.key.get<Lvl2>());
-    predicate4_cipher = tlweSymInt32Encrypt<Lvl2>(predicate4_value, Lvl2::α,
+    predicate4_cipher = tlweSymInt32Encrypt<Lvl2>(predicate4_value + 1, Lvl2::α,
                                                   pow(2., scale_bits),
                                                   sk.key.get<Lvl2>());
     predicate5_cipher = tlweSymInt32Encrypt<Lvl2>(predicate5_value, Lvl2::α,
@@ -132,8 +130,6 @@ double relational_query6(size_t num)
 
     // Start sql evaluation
     std::vector<TLWELvl1> filter_res(num);
-    std::vector<TLWELvl2> aggregation_res(num);
-    TLWELvl2 count_res;
 
     std::vector<double> revenue(num);
 
@@ -146,6 +142,12 @@ double relational_query6(size_t num)
         ship_date[i] = shipdate_message(engine);
         discount[i] = discount_message(engine);
         quantity[i] = quantity_message(engine);
+        if (i == 0) {
+            ship_date[i] = predicate1_value;
+            discount[i] = predicate3_value;
+            quantity[i] = predicate5_value - 1;
+            revenue[i] = std::max<double>(revenue[i], 1.0);
+        }
         shipdate_ciphers[i] = tlweSymInt32Encrypt<Lvl2>(ship_date[i], Lvl2::α,
                                                         pow(2., scale_bits),
                                                         sk.key.get<Lvl2>());
@@ -188,10 +190,10 @@ double relational_query6(size_t num)
     std::vector<uint64_t> plain_filter_res(num);
     uint64_t plain_agg_res = 0;
     for (size_t i = 0; i < num; i++) {
-        if (ship_date[i] > predicate1_value &&
+        if (ship_date[i] >= predicate1_value &&
             ship_date[i] < predicate2_value &&
-            discount[i] > predicate3_value &&
-            discount[i] < predicate4_value &&
+            discount[i] >= predicate3_value &&
+            discount[i] <= predicate4_value &&
             quantity[i] < predicate5_value) {
             plain_filter_res[i] = 1;
             plain_agg_res += revenue[i];
@@ -205,9 +207,7 @@ double relational_query6(size_t num)
 
     std::cout << "Aggregation :" << std::endl;
     scale_bits = 29;
-    uint64_t modq_bits = 32;
     uint64_t modulus_bits = 45;
-    uint64_t repack_scale_bits = modulus_bits + scale_bits - modq_bits;
     uint64_t slots_count = filter_res.size();
     std::cout << "Generating Parameters..." << std::endl;
     seal::EncryptionParameters parms(seal::scheme_type::ckks);
@@ -217,8 +217,6 @@ double relational_query6(size_t num)
         poly_modulus_degree,
         {59, 42, 42, 42, 42, 42, 42, 42, 42, 45, 45, 45, 45, 45, 45, 45, 45,
          45, 45, 45, 59}));
-    double scale = std::pow(2.0, scale_bits);
-
     // context instance
     seal::SEALContext context(parms, true, seal::sec_level_type::none);
 

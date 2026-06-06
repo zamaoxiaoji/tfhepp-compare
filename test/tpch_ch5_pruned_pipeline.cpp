@@ -1514,8 +1514,13 @@ namespace
         auto line_mask = EvalQ3LineitemMask(data, tfhe_sk, tfhe_ek, micro_pack);
         auto order_date_mask =
             EvalQ3OrderDateMask(data, tfhe_sk, tfhe_ek, micro_pack);
+        std::cerr << "stage=q3,predicates,start\n";
+        auto line_mask = EvalQ3LineitemMask(data, tfhe_sk, tfhe_ek);
+        auto order_date_mask = EvalQ3OrderDateMask(data, tfhe_sk, tfhe_ek);
         auto customer_segment_mask =
-            EvalQ3CustomerSegmentMask(data, tfhe_sk, tfhe_ek, micro_pack);
+            EvalQ3CustomerSegmentMask(data, tfhe_sk, tfhe_ek);
+        std::cerr << "stage=q3,predicates,done\n";
+        std::cerr << "stage=q3,pack_masks,start\n";
         auto line_mask_ct =
             PackMaskToCkks(line_mask, tfhe_sk, tfhe_ek, repack_key, repack_config, ckks);
         auto order_date_mask_ct = PackMaskToCkks(order_date_mask, tfhe_sk,
@@ -1524,6 +1529,7 @@ namespace
         auto customer_segment_mask_ct =
             PackMaskToCkks(customer_segment_mask, tfhe_sk, tfhe_ek,
                            repack_key, repack_config, ckks);
+        std::cerr << "stage=q3,pack_masks,done\n";
         DebugSlots("q3_line_mask", line_mask_ct, data.lineitem.size(), ckks);
         DebugSlots("q3_order_date_mask", order_date_mask_ct,
                    data.orders.size(), ckks);
@@ -1544,44 +1550,79 @@ namespace
             });
         auto segment_on_order = PlainKeyLookupJoinPayloadCipher(
             order_customer_keys, customer_keys, customer_segment_mask_ct, ckks);
+        const auto order_priorities =
+            ExtractU32(data.orders, [](const OrdersRow &r) {
+                return r.shippriority;
+            });
+        std::vector<double> priority_payload(data.orders.size());
+        for (std::size_t i = 0; i < data.orders.size(); ++i) {
+            priority_payload[i] = static_cast<double>(order_priorities[i]);
+        }
+
+        std::cerr << "stage=q3,customer_segment_join,start\n";
+        auto segment_on_order = LookupJoinPayloadCipher(
+            order_customer_keys, customer_keys, customer_segment_mask_ct,
+            data.key_domain, ckks);
+        std::cerr << "stage=q3,customer_segment_join,done\n";
         std::cerr << "debug=q3_segment_on_order,scale_log2="
                   << std::log2(segment_on_order.scale())
                   << ",level=" << segment_on_order.coeff_modulus_size()
                   << "\n";
         DebugSlots("q3_segment_on_order", segment_on_order,
                    data.orders.size(), ckks);
+        std::cerr << "stage=q3,order_filter,start\n";
         auto order_mask_ct =
             MultiplyAndRescale(order_date_mask_ct, segment_on_order,
                                ckks.relin_keys, ckks.evaluator);
+        std::cerr << "stage=q3,order_filter,done\n";
         std::cerr << "debug=q3_order_mask,scale_log2="
                   << std::log2(order_mask_ct.scale())
                   << ",level=" << order_mask_ct.coeff_modulus_size() << "\n";
-        auto order_mask_on_line = PlainKeyLookupJoinPayloadCipher(
-            line_order_keys, order_keys, order_mask_ct, ckks);
+        std::cerr << "stage=q3,order_mask_join,start\n";
+        auto order_mask_on_line = LookupJoinPayloadCipher(
+            line_order_keys, order_keys, order_mask_ct, data.key_domain, ckks);
+        std::cerr << "stage=q3,order_mask_join,done\n";
         std::cerr << "debug=q3_order_mask_on_line,scale_log2="
                   << std::log2(order_mask_on_line.scale())
                   << ",level=" << order_mask_on_line.coeff_modulus_size()
                   << "\n";
         DebugSlots("q3_order_mask_on_line", order_mask_on_line,
                    data.lineitem.size(), ckks);
+        std::cerr << "stage=q3,priority_join,start\n";
+        auto priority_on_line = LookupJoinPayload(
+            line_order_keys, order_keys, priority_payload, data.key_domain, ckks);
+        std::cerr << "stage=q3,priority_join,done\n";
+        std::cerr << "debug=q3_priority_on_line,scale_log2="
+                  << std::log2(priority_on_line.scale())
+                  << ",level=" << priority_on_line.coeff_modulus_size()
+                  << "\n";
+        DebugSlots("q3_priority_on_line", priority_on_line,
+                   data.lineitem.size(), ckks);
 
+        std::cerr << "stage=q3,line_order_filter,start\n";
         auto filtered =
             MultiplyAndRescale(line_mask_ct, order_mask_on_line, ckks.relin_keys,
                                ckks.evaluator);
+        std::cerr << "stage=q3,line_order_filter,done\n";
         std::cerr << "debug=q3_filtered_mask,scale_log2="
                   << std::log2(filtered.scale())
                   << ",level=" << filtered.coeff_modulus_size() << "\n";
         DebugSlots("q3_filtered_mask", filtered, data.lineitem.size(), ckks);
-        std::vector<uint32_t> group_ids(data.lineitem.size(), 0);
-        for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
-            const auto &order = data.orders[line_order_keys[i] %
-                                            data.orders.size()];
-            group_ids[i] = order.orderkey * data.priority_domain +
-                           order.shippriority;
-        }
-        auto sums = GroupByPlainMasksFilteredRevenue(
-            filtered, group_ids, data.key_domain * data.priority_domain,
-            DiscountedRevenueColumn(data), data.lineitem.size(), ckks);
+        auto order_key_ct = ckks.encrypt_integral(line_order_keys);
+        std::vector<seal::Ciphertext> group_columns{order_key_ct,
+                                                    priority_on_line};
+        std::vector<std::vector<double>> group_domains{
+            Domain(data.key_domain), Domain(data.priority_domain)};
+        std::cerr << "stage=q3,group_masks,start\n";
+        auto order_priority_masks = tfhepp_ckks::BuildTensorLagrangeMasks(
+            group_columns, group_domains,
+            ckks.relin_keys, ckks.encoder, ckks.evaluator);
+        std::cerr << "stage=q3,group_masks,done\n";
+        std::cerr << "stage=q3,groupby,start\n";
+        auto sums = GroupByFilteredRevenue(
+            filtered, order_priority_masks, RevenueColumn(data),
+            data.lineitem.size(), ckks);
+        std::cerr << "stage=q3,groupby,done\n";
         QueryPlainResult got{
             "q3", std::vector<double>(data.key_domain * data.priority_domain)};
         for (std::size_t i = 0; i < sums.size(); ++i)
@@ -1606,46 +1647,111 @@ namespace
                                  CkksEnv &ckks)
     {
         std::cerr << "stage=q5,start\n";
-        auto order_mask = EvalQ5OrderMask(data, tfhe_sk, tfhe_ek, micro_pack);
+        std::cerr << "stage=q5,predicates,start\n";
+        auto order_mask = EvalQ5OrderMask(data, tfhe_sk, tfhe_ek);
+        std::cerr << "stage=q5,predicates,done\n";
+        std::cerr << "stage=q5,pack_masks,start\n";
         auto order_mask_ct = PackMaskToCkks(order_mask, tfhe_sk, tfhe_ek,
                                             repack_key, repack_config, ckks);
+        std::cerr << "stage=q5,pack_masks,done\n";
 
         const auto line_order_keys = LineitemOrderKeys(data);
         const auto line_supp_keys = LineitemSuppKeys(data);
         const auto order_keys = ExtractU32(data.orders, [](const OrdersRow &r) {
             return r.orderkey;
         });
-        auto order_mask_on_line = PlainKeyLookupJoinPayloadCipher(
-            line_order_keys, order_keys, order_mask_ct, ckks);
-        DebugSlots("q5_order_mask_on_line", order_mask_on_line,
-                   data.lineitem.size(), ckks);
-
-        std::vector<double> static_line_filter(data.lineitem.size(), 0.0);
-        std::vector<uint32_t> group_ids(data.lineitem.size(), 0);
-        for (std::size_t i = 0; i < data.lineitem.size(); ++i) {
-            const auto &line = data.lineitem[i];
-            const auto &order = data.orders[line.orderkey % data.orders.size()];
-            const auto &customer =
-                data.customers[order.custkey % data.customers.size()];
-            const auto &supplier =
-                data.suppliers[line_supp_keys[i] % data.suppliers.size()];
-            const auto &nation =
-                data.nations[customer.nationkey % data.nations.size()];
-            group_ids[i] = customer.nationkey;
-            static_line_filter[i] =
-                (customer.nationkey == supplier.nationkey &&
-                 nation.regionkey == 1)
-                    ? 1.0
-                    : 0.0;
+        const auto order_customer_keys =
+            ExtractU32(data.orders, [](const OrdersRow &r) {
+                return r.custkey;
+            });
+        const auto customer_keys =
+            ExtractU32(data.customers, [](const CustomerRow &r) {
+                return r.custkey;
+            });
+        const auto supplier_keys =
+            ExtractU32(data.suppliers, [](const SupplierRow &r) {
+                return r.suppkey;
+            });
+        std::vector<double> cust_nation_payload(data.customers.size());
+        std::vector<double> order_cust_payload(data.orders.size());
+        for (std::size_t i = 0; i < data.orders.size(); ++i) {
+            order_cust_payload[i] = static_cast<double>(data.orders[i].custkey);
         }
+        for (std::size_t i = 0; i < data.customers.size(); ++i) {
+            cust_nation_payload[i] =
+                static_cast<double>(data.customers[i].nationkey);
+        }
+        std::vector<double> supp_nation_payload(data.suppliers.size());
+        for (std::size_t i = 0; i < data.suppliers.size(); ++i)
+            supp_nation_payload[i] =
+                static_cast<double>(data.suppliers[i].nationkey);
 
-        auto filtered = order_mask_on_line;
-        MultiplyPlainSlotsNoRescaleInPlace(filtered, static_line_filter, ckks);
-        DebugSlots("q5_filtered_mask", filtered, data.lineitem.size(), ckks);
+        std::cerr << "stage=q5,order_mask_join,start\n";
+        auto order_mask_on_line = LookupJoinPayloadCipher(
+            line_order_keys, order_keys, order_mask_ct, data.key_domain, ckks);
+        std::cerr << "stage=q5,order_mask_join,done\n";
+        std::cerr << "stage=q5,order_customer_join,start\n";
+        auto order_customer_on_line = LookupJoinPayload(
+            line_order_keys, order_keys, order_cust_payload, data.key_domain, ckks);
+        std::cerr << "stage=q5,order_customer_join,done\n";
+        std::cerr << "stage=q5,customer_nation_join,start\n";
+        auto customer_nation_on_line = LookupJoinPayloadFromCipherKey(
+            order_customer_on_line, customer_keys, cust_nation_payload,
+            data.lineitem.size(), data.key_domain, ckks);
+        std::cerr << "stage=q5,customer_nation_join,done\n";
+        std::cerr << "stage=q5,supplier_nation_join,start\n";
+        auto supplier_nation_on_line = LookupJoinPayload(
+            line_supp_keys, supplier_keys, supp_nation_payload, data.key_domain, ckks);
+        std::cerr << "stage=q5,supplier_nation_join,done\n";
 
-        auto sums = GroupByPlainMasksFilteredRevenue(
-            filtered, group_ids, data.nation_domain,
-            DiscountedRevenueColumn(data), data.lineitem.size(), ckks);
+        std::cerr << "stage=q5,nation_masks,start\n";
+        auto nation_masks = BuildMasksForColumn(customer_nation_on_line,
+                                                data.nation_domain, ckks);
+        auto supplier_nation_masks = BuildMasksForColumn(supplier_nation_on_line,
+                                                         data.nation_domain, ckks);
+        std::cerr << "stage=q5,nation_masks,done\n";
+        std::cerr << "stage=q5,same_nation,start\n";
+        seal::Ciphertext same_nation;
+        bool initialized = false;
+        for (std::size_t i = 0; i < data.nation_domain; ++i) {
+            auto term = MultiplyAndRescale(nation_masks[i], supplier_nation_masks[i],
+                                           ckks.relin_keys, ckks.evaluator);
+            if (!initialized) {
+                same_nation = term;
+                initialized = true;
+            }
+            else {
+                AddAlignedInPlace(same_nation, term, ckks.evaluator);
+            }
+        }
+        std::cerr << "stage=q5,same_nation,done\n";
+
+        std::vector<double> region_ok_by_nation(data.nation_domain, 0.0);
+        for (const auto &nation : data.nations)
+            region_ok_by_nation[nation.nationkey] =
+                (nation.regionkey == 1) ? 1.0 : 0.0;
+        auto nation_keys = ExtractU32(data.nations, [](const NationRow &r) {
+            return r.nationkey;
+        });
+        std::cerr << "stage=q5,region_join,start\n";
+        auto region_on_line = LookupJoinPayloadFromCipherKey(
+            customer_nation_on_line, nation_keys, region_ok_by_nation,
+            data.lineitem.size(), data.nation_domain, ckks);
+        std::cerr << "stage=q5,region_join,done\n";
+
+        std::cerr << "stage=q5,final_filter,start\n";
+        auto filtered =
+            MultiplyAndRescale(order_mask_on_line, same_nation, ckks.relin_keys,
+                               ckks.evaluator);
+        filtered =
+            MultiplyAndRescale(filtered, region_on_line, ckks.relin_keys,
+                               ckks.evaluator);
+        std::cerr << "stage=q5,final_filter,done\n";
+        std::cerr << "stage=q5,groupby,start\n";
+        auto sums = GroupByFilteredRevenue(
+            filtered, nation_masks, RevenueColumn(data), data.lineitem.size(),
+            ckks);
+        std::cerr << "stage=q5,groupby,done\n";
         QueryPlainResult got{"q5", std::vector<double>(data.nation_domain)};
         for (std::size_t i = 0; i < sums.size(); ++i)
             got.values[i] = DecryptSlots(sums[i], ckks.decryptor, ckks.encoder)[0];
